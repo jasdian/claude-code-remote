@@ -44,8 +44,8 @@ pub async fn claude(
     let state = ctx.data();
     let config = &state.config.claude;
 
-    let cwd_str = config.resolve_cwd(project.as_deref());
-    let cwd = Path::new(cwd_str);
+    let cwd_str = config.resolve_cwd(project.as_deref()).await?;
+    let cwd = Path::new(cwd_str.as_ref());
     let tools = config.resolve_tools(project.as_deref());
 
     let is_dm = ctx.guild_id().is_none();

@@ -108,8 +108,8 @@ async fn start_claude(
     resume_id: Option<&str>,
 ) -> Result<(), AppError> {
     let config = &state.config.claude;
-    let cwd_str = config.resolve_cwd(project);
-    let cwd = Path::new(cwd_str);
+    let cwd_str = config.resolve_cwd(project).await?;
+    let cwd = Path::new(cwd_str.as_ref());
     let tools = config.resolve_tools(project);
 
     let (tx, rx) = crate::claude::process::event_channel();

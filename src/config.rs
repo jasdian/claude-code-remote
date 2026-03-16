@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -160,12 +161,32 @@ impl ClaudeConfig {
             .unwrap_or(Cow::Borrowed(self.allowed_tools.as_slice()))
     }
 
-    /// P1: Resolve cwd. Returns &str reference, never allocates.
-    pub fn resolve_cwd(&self, project: Option<&str>) -> &str {
-        project
-            .and_then(|p| self.projects.get(p))
-            .map(|pc| pc.cwd.as_ref())
-            .unwrap_or(&self.default_cwd)
+    /// P1/P4: Resolve cwd. Config lookup → sibling directory → error if named project not found.
+    /// Returns Cow::Borrowed for config hits, Cow::Owned for discovered sibling paths.
+    pub async fn resolve_cwd(&self, project: Option<&str>) -> Result<Cow<'_, str>, crate::error::AppError> {
+        let Some(name) = project else {
+            return Ok(Cow::Borrowed(self.default_cwd.as_ref()));
+        };
+
+        // 1. Exact match in [claude.projects] config
+        if let Some(pc) = self.projects.get(name) {
+            return Ok(Cow::Borrowed(pc.cwd.as_ref()));
+        }
+
+        // 2. Try as sibling directory of default_cwd
+        if let Some(parent) = Path::new(self.default_cwd.as_ref()).parent() {
+            let candidate = parent.join(name);
+            if tokio::fs::metadata(&candidate)
+                .await
+                .is_ok_and(|m| m.is_dir())
+            {
+                return Ok(Cow::Owned(candidate.to_string_lossy().into_owned()));
+            }
+        }
+
+        Err(crate::error::AppError::config(&format!(
+            "project '{name}' not found in config or as sibling of default_cwd"
+        )))
     }
 }
 
