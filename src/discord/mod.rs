@@ -22,14 +22,43 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
             ],
             event_handler: |ctx, event, _fw_ctx, state| {
                 Box::pin(async move {
-                    if let poise::serenity_prelude::FullEvent::Message { new_message } = event {
-                        if let Err(e) =
-                            handler::handle_message(ctx, new_message, state).await
-                        {
-                            tracing::error!(error = %e, "message handler error");
-                        }
+                    if let poise::serenity_prelude::FullEvent::Message { new_message } = event
+                        && let Err(e) = handler::handle_message(ctx, new_message, state).await
+                    {
+                        tracing::error!(error = %e, "message handler error");
                     }
                     Ok(())
+                })
+            },
+            on_error: |error| {
+                Box::pin(async move {
+                    match error {
+                        poise::FrameworkError::Command { ref error, ref ctx, .. } => {
+                            tracing::error!(
+                                command = ctx.command().name,
+                                user = ctx.author().name,
+                                error = %error,
+                                "command error",
+                            );
+                            let _ = ctx.say(format!("Error: {error}")).await;
+                        }
+                        poise::FrameworkError::CommandStructureMismatch {
+                            ref description,
+                            ref ctx,
+                            ..
+                        } => {
+                            tracing::error!(
+                                command = %ctx.command.name,
+                                %description,
+                                "command structure mismatch",
+                            );
+                        }
+                        other => {
+                            if let Err(e) = poise::builtins::on_error(other).await {
+                                tracing::error!(error = %e, "error handler failed");
+                            }
+                        }
+                    }
                 })
             },
             ..Default::default()

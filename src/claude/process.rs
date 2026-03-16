@@ -90,10 +90,33 @@ pub async fn run_claude(
         .take()
         .ok_or_else(|| AppError::claude("no stdout from claude process"))?;
 
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::claude("no stderr from claude process"))?;
+
     let reader_cancel = cancel.clone();
     let reader_task = tokio::spawn(async move {
+        // Spawn stderr reader to capture error output
+        let stderr_task = tokio::spawn(async move {
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            let mut stderr_buf = String::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::warn!(line, "claude stderr");
+                if stderr_buf.len() < 2048 {
+                    if !stderr_buf.is_empty() {
+                        stderr_buf.push('\n');
+                    }
+                    stderr_buf.push_str(&line);
+                }
+            }
+            stderr_buf
+        });
+
         let reader = BufReader::with_capacity(STDOUT_BUF_CAPACITY, stdout);
         let mut lines = reader.lines();
+        let mut got_events = false;
 
         loop {
             tokio::select! {
@@ -104,7 +127,9 @@ pub async fn run_claude(
                 line_result = lines.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
+                            tracing::trace!(line, "claude stdout");
                             if let Some(event) = super::parser::parse_stream_line(&line) {
+                                got_events = true;
                                 if event_tx.send(event).await.is_err() {
                                     break;
                                 }
@@ -122,6 +147,24 @@ pub async fn run_claude(
                 }
             }
         }
+
+        // If we got no events, check stderr for error details
+        if !got_events
+            && let Ok(stderr_output) = stderr_task.await
+        {
+                if !stderr_output.is_empty() {
+                    tracing::error!(stderr = %stderr_output, "claude process produced no events");
+                    let _ = event_tx.send(ClaudeEvent::Error(
+                        format!("claude error: {stderr_output}").into_boxed_str()
+                    )).await;
+                } else {
+                    tracing::error!("claude process produced no output at all");
+                    let _ = event_tx.send(ClaudeEvent::Error(
+                        "claude process exited with no output".into()
+                    )).await;
+                }
+        }
+
         let _ = event_tx.send(ClaudeEvent::Done).await;
     });
 

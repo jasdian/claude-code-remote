@@ -138,9 +138,17 @@ pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
 
 #[inline]
 fn truncate_thread_name(prompt: &str) -> String {
-    if prompt.len() <= 97 {
-        format!("CC: {prompt}")
+    const PREFIX: &str = "CC: ";
+    const SUFFIX: &str = "...";
+    const MAX: usize = 100;
+    const BUDGET: usize = MAX - PREFIX.len(); // 96
+    const TRUNC_BUDGET: usize = BUDGET - SUFFIX.len(); // 93
+
+    if prompt.len() <= BUDGET {
+        format!("{PREFIX}{prompt}")
     } else {
-        format!("CC: {}...", &prompt[..94])
+        // Find a valid char boundary at or before TRUNC_BUDGET
+        let end = prompt.floor_char_boundary(TRUNC_BUDGET);
+        format!("{PREFIX}{}{SUFFIX}", &prompt[..end])
     }
 }

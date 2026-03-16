@@ -121,11 +121,9 @@ fn parse_result(v: &serde_json::Value) -> Option<ClaudeEvent> {
 
     // Check if there's a result text we haven't sent yet
     // (in case the assistant event was missed or had no text)
-    if let Some(result_text) = v.get("result").and_then(|r| r.as_str()) {
-        if !result_text.is_empty() {
-            // We already sent text via the "assistant" event, so just emit Done
-            let _ = result_text;
-        }
+    if let Some(result_text) = v.get("result").and_then(|r| r.as_str()) && !result_text.is_empty() {
+        // We already sent text via the "assistant" event, so just emit Done
+        let _ = result_text;
     }
 
     Some(ClaudeEvent::Done)
