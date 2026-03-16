@@ -1,0 +1,38 @@
+[discord]
+token = "YOUR_BOT_TOKEN"
+guild_id = 123456789012345678
+
+[claude]
+binary = "claude"
+default_cwd = "/home/you/projects"
+
+# Tools that Claude is allowed to use. These are auto-approved in headless (-p) mode.
+# Tools NOT listed here are denied (fail-closed), not prompted.
+allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+
+max_sessions = 3
+session_timeout_minutes = 30
+
+# Optional system prompt appended to every Claude session
+# system_prompt = "You are helping via Discord. Keep responses concise."
+
+# Skip ALL permission prompts (use with caution — only in trusted environments).
+# When false (default), Claude auto-approves tools in allowed_tools and denies others.
+# When true, adds --dangerously-skip-permissions to the CLI invocation.
+# dangerously_skip_permissions = false
+
+# Per-project overrides: use /claude <prompt> myapp to activate
+[claude.projects.myapp]
+cwd = "/home/you/projects/myapp"
+# allowed_tools = ["Read", "Grep"]   # Override tools for this project
+
+[auth]
+allowed_users = [123456789012345678]   # Discord user IDs
+allowed_roles = []                     # Discord role IDs
+
+[database]
+url = "sqlite:data.db?mode=rwc"
+
+[logging]
+level = "info"       # debug, info, warn, error
+format = "pretty"    # pretty or json
