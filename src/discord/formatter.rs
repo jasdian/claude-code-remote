@@ -4,8 +4,8 @@ use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ClaudeEvent, ThreadId};
 use crate::AppState;
+use crate::domain::{ClaudeEvent, ThreadId};
 
 const BUFFER_INITIAL_CAPACITY: usize = 2048;
 const FLUSH_THRESHOLD: usize = 1800;

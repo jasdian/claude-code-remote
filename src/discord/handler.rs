@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 
+use crate::AppState;
 use crate::domain::{ThreadId, UserId};
 use crate::error::AppError;
-use crate::AppState;
 
 /// Check if a channel is a DM
 fn is_dm(msg: &serenity::Message) -> bool {
@@ -75,15 +75,23 @@ pub async fn handle_message(
 
         // Resume existing session
         tracing::info!(?thread_id, "resuming session");
-        return start_claude(ctx, msg, state, thread_id, &prompt, session.project.as_deref(),
-            session.claude_session_id.as_ref().map(|s| s.as_str())).await;
+        return start_claude(
+            ctx,
+            msg,
+            state,
+            thread_id,
+            &prompt,
+            Some(&session.project),
+            session.claude_session_id.as_ref().map(|s| s.as_str()),
+        )
+        .await;
     }
 
     // No existing session — if this is a DM, auto-create one
     if is_dm(msg) && is_authorized(state, msg.author.id.get()) {
         tracing::info!(user = msg.author.name, "new DM session");
 
-        crate::db::create_session(&state.db, thread_id, user_id, None).await?;
+        crate::db::create_session(&state.db, thread_id, user_id, "default").await?;
         return start_claude(ctx, msg, state, thread_id, &prompt, None, None).await;
     }
 
@@ -107,16 +115,9 @@ async fn start_claude(
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
-    let handle = crate::claude::process::run_claude(
-        config,
-        prompt,
-        resume_id,
-        cwd,
-        &tools,
-        tx,
-        cancel,
-    )
-    .await?;
+    let handle =
+        crate::claude::process::run_claude(config, prompt, resume_id, cwd, &tools, tx, cancel)
+            .await?;
 
     state
         .session_manager

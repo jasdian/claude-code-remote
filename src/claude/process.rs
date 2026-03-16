@@ -149,20 +149,22 @@ pub async fn run_claude(
         }
 
         // If we got no events, check stderr for error details
-        if !got_events
-            && let Ok(stderr_output) = stderr_task.await
-        {
-                if !stderr_output.is_empty() {
-                    tracing::error!(stderr = %stderr_output, "claude process produced no events");
-                    let _ = event_tx.send(ClaudeEvent::Error(
-                        format!("claude error: {stderr_output}").into_boxed_str()
-                    )).await;
-                } else {
-                    tracing::error!("claude process produced no output at all");
-                    let _ = event_tx.send(ClaudeEvent::Error(
-                        "claude process exited with no output".into()
-                    )).await;
-                }
+        if !got_events && let Ok(stderr_output) = stderr_task.await {
+            if !stderr_output.is_empty() {
+                tracing::error!(stderr = %stderr_output, "claude process produced no events");
+                let _ = event_tx
+                    .send(ClaudeEvent::Error(
+                        format!("claude error: {stderr_output}").into_boxed_str(),
+                    ))
+                    .await;
+            } else {
+                tracing::error!("claude process produced no output at all");
+                let _ = event_tx
+                    .send(ClaudeEvent::Error(
+                        "claude process exited with no output".into(),
+                    ))
+                    .await;
+            }
         }
 
         let _ = event_tx.send(ClaudeEvent::Done).await;

@@ -71,7 +71,7 @@ pub struct Session {
     pub last_active_at: DateTime<Utc>,
     // Cold path fields
     pub claude_session_id: Option<ClaudeSessionId>,
-    pub project: Option<Arc<str>>,
+    pub project: Arc<str>,
     pub created_at: DateTime<Utc>,
 }
 

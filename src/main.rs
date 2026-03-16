@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
+use claude_remote_chat::AppState;
 use claude_remote_chat::claude::session::SessionManager;
 use claude_remote_chat::config::AppConfig;
-use claude_remote_chat::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,9 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
         }
         _ => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .init();
+            tracing_subscriber::fmt().with_env_filter(filter).init();
         }
     }
 

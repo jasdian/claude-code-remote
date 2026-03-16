@@ -121,7 +121,9 @@ fn parse_result(v: &serde_json::Value) -> Option<ClaudeEvent> {
 
     // Check if there's a result text we haven't sent yet
     // (in case the assistant event was missed or had no text)
-    if let Some(result_text) = v.get("result").and_then(|r| r.as_str()) && !result_text.is_empty() {
+    if let Some(result_text) = v.get("result").and_then(|r| r.as_str())
+        && !result_text.is_empty()
+    {
         // We already sent text via the "assistant" event, so just emit Done
         let _ = result_text;
     }
@@ -166,7 +168,8 @@ mod tests {
 
     #[test]
     fn parse_assistant_text() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
+        let line =
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
         match parse_stream_line(line) {
             Some(ClaudeEvent::TextDelta(t)) => assert_eq!(&*t, "Hello!"),
             other => panic!("unexpected: {other:?}"),
@@ -218,8 +221,7 @@ mod tests {
     // Keep legacy content_block_delta test for future API-style streaming
     #[test]
     fn parse_content_block_delta() {
-        let line =
-            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#;
+        let line = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#;
         match parse_stream_line(line) {
             Some(ClaudeEvent::TextDelta(t)) => assert_eq!(&*t, "hello"),
             other => panic!("unexpected: {other:?}"),

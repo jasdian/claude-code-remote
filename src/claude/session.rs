@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dashmap::DashMap;
-use smallvec::SmallVec;
-use tokio::time::Instant;
 use crate::config::AppConfig;
 use crate::domain::{ClaudeSessionId, ThreadId};
 use crate::error::AppError;
+use dashmap::DashMap;
+use smallvec::SmallVec;
+use tokio::time::Instant;
 
 use super::process::ClaudeProcessHandle;
 

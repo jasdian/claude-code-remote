@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 
+use crate::Context;
 use crate::domain::{ThreadId, UserId};
 use crate::error::AppError;
-use crate::Context;
 
 #[inline]
 async fn check_auth(ctx: &Context<'_>) -> Result<(), AppError> {
@@ -18,14 +18,18 @@ async fn check_auth(ctx: &Context<'_>) -> Result<(), AppError> {
 
     if let Some(member) = ctx.author_member().await {
         let has_role = member.roles.iter().any(|role: &serenity::RoleId| {
-            auth.allowed_roles.iter().any(|&allowed| allowed == role.get())
+            auth.allowed_roles
+                .iter()
+                .any(|&allowed| allowed == role.get())
         });
         if has_role {
             return Ok(());
         }
     }
 
-    Err(AppError::unauthorized("not in allowed_users or allowed_roles"))
+    Err(AppError::unauthorized(
+        "not in allowed_users or allowed_roles",
+    ))
 }
 
 #[poise::command(slash_command)]
@@ -70,23 +74,16 @@ pub async fn claude(
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
-    let handle = crate::claude::process::run_claude(
-        config,
-        &prompt,
-        None,
-        cwd,
-        &tools,
-        tx,
-        cancel,
-    )
-    .await?;
+    let handle =
+        crate::claude::process::run_claude(config, &prompt, None, cwd, &tools, tx, cancel).await?;
 
     state
         .session_manager
         .register(thread_id, handle, cwd.to_path_buf())?;
 
     let user_id = UserId::from(ctx.author().id);
-    crate::db::create_session(&state.db, thread_id, user_id, project.as_deref()).await?;
+    let project_name = project.as_deref().unwrap_or("default");
+    crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
 
     let stream_cancel = state.shutdown.child_token();
     tokio::spawn(super::formatter::stream_to_discord(
@@ -97,10 +94,6 @@ pub async fn claude(
         stream_cancel,
     ));
 
-    if !is_dm {
-        ctx.say(format!("Session started in <#{}>", response_channel))
-            .await?;
-    }
     Ok(())
 }
 
@@ -119,7 +112,8 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), AppError> {
         .is_some()
     {
         crate::db::update_session_status(&ctx.data().db, thread_id, "stopped").await?;
-        ctx.say("Session stopped (process already finished).").await?;
+        ctx.say("Session stopped (process already finished).")
+            .await?;
     } else {
         ctx.say("No session in this thread.").await?;
     }

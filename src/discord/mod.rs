@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 
-use crate::error::AppError;
 use crate::AppState;
+use crate::error::AppError;
 
 pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
     let token = state.config.discord.token.clone();
@@ -15,11 +15,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![
-                commands::claude(),
-                commands::stop(),
-                commands::sessions(),
-            ],
+            commands: vec![commands::claude(), commands::stop(), commands::sessions()],
             event_handler: |ctx, event, _fw_ctx, state| {
                 Box::pin(async move {
                     if let poise::serenity_prelude::FullEvent::Message { new_message } = event
@@ -33,7 +29,9 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
             on_error: |error| {
                 Box::pin(async move {
                     match error {
-                        poise::FrameworkError::Command { ref error, ref ctx, .. } => {
+                        poise::FrameworkError::Command {
+                            ref error, ref ctx, ..
+                        } => {
                             tracing::error!(
                                 command = ctx.command().name,
                                 user = ctx.author().name,
