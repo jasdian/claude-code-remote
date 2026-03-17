@@ -66,9 +66,10 @@ fn parse_assistant(v: &serde_json::Value) -> Option<ClaudeEvent> {
                     text_parts.clear();
                 }
                 if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
+                    let preview = extract_tool_preview(name, block);
                     events.push(ClaudeEvent::ToolUse {
                         tool: Arc::from(name),
-                        input_preview: Arc::from(""),
+                        input_preview: Arc::from(preview.as_str()),
                     });
                 }
             }
@@ -153,12 +154,63 @@ fn parse_block_start(v: &serde_json::Value) -> Option<ClaudeEvent> {
     match block_type {
         "tool_use" => {
             let tool = block.get("name")?.as_str()?;
+            let preview = extract_tool_preview(tool, v);
             Some(ClaudeEvent::ToolUse {
                 tool: Arc::from(tool),
-                input_preview: Arc::from(""),
+                input_preview: Arc::from(preview.as_str()),
             })
         }
         _ => None,
+    }
+}
+
+/// Extract a short preview from tool input for display.
+/// Returns the most relevant field based on tool type.
+#[inline]
+fn extract_tool_preview(tool: &str, block: &serde_json::Value) -> String {
+    let input = match block.get("input") {
+        Some(i) => i,
+        None => return String::new(),
+    };
+
+    let preview = match tool {
+        "Bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Read" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Write" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Grep" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Glob" => input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        "Agent" => input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        _ => "",
+    };
+
+    // Truncate long previews
+    if preview.len() > 120 {
+        let end = preview.floor_char_boundary(117);
+        format!("{}...", &preview[..end])
+    } else {
+        preview.to_string()
     }
 }
 

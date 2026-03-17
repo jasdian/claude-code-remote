@@ -152,14 +152,18 @@ async fn stream_events(
                             send_message(http, channel_id, &chunk).await;
                         }
                     }
-                    Some(ClaudeEvent::ToolUse { tool, .. }) => {
+                    Some(ClaudeEvent::ToolUse { tool, input_preview }) => {
                         if !buffer.is_empty() {
                             let chunk = take_all(&mut buffer);
                             send_message(http, channel_id, &chunk).await;
                             in_code_fence = false;
                         }
-                        send_message(http, channel_id,
-                            &format!("_Using {} ..._", &*tool)).await;
+                        let msg = if input_preview.is_empty() {
+                            format!("_Using {} ..._", &*tool)
+                        } else {
+                            format!("_Using {} ..._ ||`{}`||", &*tool, &*input_preview)
+                        };
+                        send_message(http, channel_id, &msg).await;
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error }) => {
                         let status = if is_error { "failed" } else { "done" };

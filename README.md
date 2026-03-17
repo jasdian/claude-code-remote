@@ -47,18 +47,23 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - **DM mode** — message the bot directly, no slash commands needed
 - **Server mode** — thread-per-session with `/claude` slash command
 - **@mention support** — mention the bot in a session thread to continue the conversation
-- Slash commands: `/claude`, `/stop`, `/sessions`
-- Natural follow-ups — just type to continue the conversation
+- Slash commands: `/claude`, `/end`, `/interrupt`, `/sessions`
+- **Message queuing** — messages sent while Claude is busy are queued (📨) and auto-processed
+- **Interrupt** — `!` prefix or `/interrupt` kills current task and sends the new message (⏭️)
+- Natural follow-ups — just type in the thread to continue
 - Smart message chunking (handles Discord's 2000-char limit)
-- Typing indicators and tool-use status messages
+- Typing indicators and tool-use status with spoiler previews (click to see details)
+- `/end` archives the thread after stopping the session
 
 **Claude Code Management**
 - Subprocess lifecycle via `tokio::process`
 - Streaming `stream-json` parser for real-time output
 - Multi-turn conversations via `--resume SESSION_ID`
+- Smart project resolution — named projects, sibling directory discovery, or default cwd
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
 - Session timeout and automatic cleanup
+- stderr capture — Claude process errors are logged and surfaced to Discord
 
 **Security**
 - Discord user/role allowlist
@@ -68,8 +73,8 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 **Operations**
 - SQLite session persistence (survives bot restarts)
 - TOML configuration
-- Structured logging via `tracing`
-- Graceful shutdown (kills Claude processes on SIGTERM)
+- Structured logging via `tracing` with custom poise error handler
+- Graceful shutdown (SIGINT/SIGTERM with 5s timeout)
 
 ## Prerequisites
 
@@ -188,12 +193,16 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | Command | Where | Description |
 |---------|-------|-------------|
 | `/claude <prompt> [project]` | Server | Start a new Claude session in a thread |
-| `/stop` | Server thread | Kill the active Claude process |
-| `/sessions` | Anywhere | List all active sessions |
+| `/end` | Session thread | Stop session and archive the thread |
+| `/interrupt [prompt]` | Session thread | Kill current task, optionally send new prompt |
+| `/sessions` | Anywhere | Show active session count |
 | *(just type)* | DM | Start or continue a Claude session |
 | *@mention bot* | Session thread | Continue the conversation |
+| `!message` | Session thread | Interrupt current task and send message |
 
 After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
+
+If Claude is busy, your message is **queued** (📨 reaction) and sent automatically when the current task finishes. Prefix with `!` to **interrupt** (⏭️ reaction) — kills the current task and sends your message immediately.
 
 ## Build Commands
 
@@ -224,31 +233,26 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 
 | Problem | Fix |
 |---------|-----|
-| "The application did not respond" on `/claude` | This is fixed — the bot now defers the interaction immediately. If you still see it, ensure the bot has Send Messages permission. |
+| "The application did not respond" on `/claude` | Ensure the bot has Send Messages permission |
 | Bot connects then disconnects with "Disallowed intents" | Enable **Message Content Intent** in Bot settings on the Developer Portal |
 | Slash commands don't appear | Wait 1-2 minutes after first bot startup for Discord to register them globally |
 | Bot doesn't respond to DMs | Make sure your user ID is in `auth.allowed_users` in config.toml |
-| "failed to spawn claude" error | Ensure `claude` CLI is in PATH and authenticated (`claude --version`) |
-| Bot responds but Claude output is empty | Check that `claude.default_cwd` points to a valid directory |
+| "failed to spawn claude" error | Ensure `claude` CLI is in PATH and authenticated. On NixOS, use an FHS wrapper script as `binary` |
+| Bot responds but Claude output is empty | Check stderr logs — Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
-| Follow-up messages start new conversations | Check logs for resume errors — the session may have expired or the `claude_session_id` wasn't captured |
+| Follow-up messages start new conversations | Check logs for `claude_session_id` — the session may have expired |
+| Ctrl+C doesn't work | Run the binary directly (`./target/debug/claude-remote-chat`), not via `cargo run` |
+| "Invalid Form Body (name)" error | Thread name exceeded 100 chars — this is now fixed with proper truncation |
 
 ## Roadmap
 
-As of v0.1.0 - fixing any BUGS is the priority first.
-
-Potential future features for v1.0.0:
+Potential future features:
 
 - **Interactive permission prompts** — Use `--permission-prompt-tool` to route Claude's permission requests to Discord, letting users approve/deny tool use from their phone via reaction buttons
 - **Session list with details** — Enhance `/sessions` to show thread links, project names, and session age
 - **Multi-user session sharing** — Allow other authorized users to interact with a session in the same thread
 - **File attachment support** — Send files via Discord attachments for Claude to read
 - **Git worktree per session** — Isolate concurrent sessions working on the same project
-
-Extra futures, not important:
-
-- **Web dashboard** — Browser-based session monitoring and management
-- **Webhook notifications** — Alert on session completion, errors, or permission prompts via external webhooks
 
 ## Related Projects
 
