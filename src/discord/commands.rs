@@ -48,12 +48,12 @@ pub async fn claude(
     let state = ctx.data();
     let config = &state.config.claude;
 
-    let cwd_str = config.resolve_cwd(project.as_deref()).await?;
-    let cwd = Path::new(cwd_str.as_ref());
     let tools = config.resolve_tools(project.as_deref());
 
     let is_dm = ctx.guild_id().is_none();
-    let project_name = crate::project_name_from_cwd(cwd);
+    // Resolve base cwd for project name (before worktree override)
+    let base_cwd_str = config.resolve_cwd(project.as_deref()).await?;
+    let project_name = crate::project_name_from_cwd(Path::new(base_cwd_str.as_ref()));
     let prompt_excerpt = truncate_prompt(&prompt, 200);
     let start_msg = format!("**{project_name}**\n> {prompt_excerpt}");
 
@@ -78,18 +78,25 @@ pub async fn claude(
 
     let thread_id = ThreadId::from(response_channel);
 
+    // Resolve cwd with optional worktree isolation
+    let (cwd, worktree_path) =
+        crate::claude::worktree::resolve_session_cwd(config, project.as_deref(), thread_id, None)
+            .await?;
+
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
     let handle =
-        crate::claude::process::run_claude(config, &prompt, None, cwd, &tools, tx, cancel).await?;
+        crate::claude::process::run_claude(config, &prompt, None, &cwd, &tools, tx, cancel).await?;
+
+    // DB write first — borrows worktree_path; register() moves it after.
+    let user_id = UserId::from(ctx.author().id);
+    let wt_str = worktree_path.as_ref().and_then(|p| p.to_str());
+    crate::db::create_session(&state.db, thread_id, user_id, project_name, wt_str).await?;
 
     state
         .session_manager
-        .register(thread_id, handle, cwd.to_path_buf())?;
-
-    let user_id = UserId::from(ctx.author().id);
-    crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
+        .register(thread_id, handle, cwd, worktree_path)?;
 
     let stream_cancel = state.shutdown.child_token();
     tokio::spawn(super::formatter::stream_to_discord(
@@ -109,14 +116,24 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
     check_auth(&ctx).await?;
     let thread_id = ThreadId::from(ctx.channel_id());
 
-    let had_session = if let Some(handle) = ctx.data().session_manager.remove(thread_id) {
+    // Look up session for worktree cleanup before changing status
+    let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+
+    let had_session = if let Some((handle, wt_path)) = ctx.data().session_manager.remove(thread_id)
+    {
         handle.kill().await?;
+        if let Some(ref wt) = wt_path {
+            crate::claude::worktree::remove_worktree(wt).await;
+        }
         crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
         true
-    } else if crate::db::get_session_by_thread(&ctx.data().db, thread_id)
-        .await?
-        .is_some()
-    {
+    } else if session.is_some() {
+        // Clean up worktree from DB even if no active process
+        if let Some(ref s) = session
+            && let Some(ref wt) = s.worktree_path
+        {
+            crate::claude::worktree::remove_worktree(std::path::Path::new(wt.as_ref())).await;
+        }
         crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
         true
     } else {
@@ -291,20 +308,25 @@ async fn send_session_command(
     // Resume with the CLI command
     let config = &state.config.claude;
     let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
-    let cwd_str = config.resolve_cwd(Some(&session.project)).await?;
-    let cwd = Path::new(cwd_str.as_ref());
+    let (cwd, worktree_path) = crate::claude::worktree::resolve_session_cwd(
+        config,
+        Some(&session.project),
+        thread_id,
+        session.worktree_path.as_deref(),
+    )
+    .await?;
     let tools = config.resolve_tools(Some(&session.project));
 
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
     let handle =
-        crate::claude::process::run_claude(config, cli_cmd, resume_id, cwd, &tools, tx, cancel)
+        crate::claude::process::run_claude(config, cli_cmd, resume_id, &cwd, &tools, tx, cancel)
             .await?;
 
     state
         .session_manager
-        .register(thread_id, handle, cwd.to_path_buf())?;
+        .register(thread_id, handle, cwd, worktree_path)?;
     crate::db::touch_session(&state.db, thread_id).await?;
 
     ctx.say(status_msg).await?;

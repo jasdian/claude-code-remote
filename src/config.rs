@@ -40,12 +40,15 @@ struct RawClaudeConfig {
     system_prompt: Option<String>,
     #[serde(default)]
     dangerously_skip_permissions: bool,
+    #[serde(default)]
+    use_worktrees: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawProjectConfig {
     cwd: String,
     allowed_tools: Option<Vec<String>>,
+    use_worktrees: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,12 +131,14 @@ pub struct ClaudeConfig {
     pub session_timeout_minutes: u64,
     pub system_prompt: Option<Arc<str>>,
     pub dangerously_skip_permissions: bool,
+    pub use_worktrees: bool,
 }
 
 #[derive(Debug)]
 pub struct ProjectConfig {
     pub cwd: Arc<str>,
     pub allowed_tools: Option<SmallVec<[Arc<str>; 8]>>,
+    pub use_worktrees: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -162,6 +167,16 @@ impl ClaudeConfig {
             .and_then(|pc| pc.allowed_tools.as_ref())
             .map(|tools| Cow::Owned(tools.to_vec()))
             .unwrap_or(Cow::Borrowed(self.allowed_tools.as_slice()))
+    }
+
+    /// Resolve whether worktrees are enabled for a project.
+    /// Per-project override wins, falls back to global setting.
+    #[inline]
+    pub fn resolve_worktrees(&self, project: Option<&str>) -> bool {
+        project
+            .and_then(|p| self.projects.get(p))
+            .and_then(|pc| pc.use_worktrees)
+            .unwrap_or(self.use_worktrees)
     }
 
     /// P1/P4: Resolve cwd. Config lookup → sibling directory → error if named project not found.
@@ -227,6 +242,7 @@ impl AppConfig {
                             allowed_tools: v
                                 .allowed_tools
                                 .map(|tools| tools.iter().map(|s| Arc::from(s.as_str())).collect()),
+                            use_worktrees: v.use_worktrees,
                         };
                         (Arc::from(k.as_str()), pc)
                     })
@@ -241,6 +257,7 @@ impl AppConfig {
                 session_timeout_minutes: raw.claude.session_timeout_minutes,
                 system_prompt: raw.claude.system_prompt.map(|s| Arc::from(s.as_str())),
                 dangerously_skip_permissions: raw.claude.dangerously_skip_permissions,
+                use_worktrees: raw.claude.use_worktrees,
             },
             database: DatabaseConfig {
                 url: Arc::from(raw.database.url.as_str()),

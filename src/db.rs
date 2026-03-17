@@ -16,6 +16,7 @@ struct SessionRow {
     status: String,
     created_at: String,
     last_active_at: String,
+    worktree_path: Option<String>,
 }
 
 impl<'r> FromRow<'r, SqliteRow> for SessionRow {
@@ -29,6 +30,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
             status: row.try_get("status")?,
             created_at: row.try_get("created_at")?,
             last_active_at: row.try_get("last_active_at")?,
+            worktree_path: row.try_get("worktree_path")?,
         })
     }
 }
@@ -122,6 +124,14 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         tracing::info!("migration: v1 -> v2 (tool_uses audit columns)");
     }
 
+    if version < 3 {
+        sqlx::query("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
+            .execute(pool)
+            .await?;
+        sqlx::query("PRAGMA user_version = 3").execute(pool).await?;
+        tracing::info!("migration: v2 -> v3 (worktree_path column)");
+    }
+
     Ok(())
 }
 
@@ -130,19 +140,21 @@ pub async fn create_session(
     thread_id: ThreadId,
     user_id: UserId,
     project: &str,
+    worktree_path: Option<&str>,
 ) -> Result<(), AppError> {
     let id = Uuid::new_v4().to_string();
     let tid = thread_id.get() as i64;
     let uid = user_id.get() as i64;
     sqlx::query(
-        "INSERT INTO sessions (id, thread_id, user_id, project, status)
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO sessions (id, thread_id, user_id, project, status, worktree_path)
+         VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(tid)
     .bind(uid)
     .bind(project)
     .bind(SessionStatus::Active.as_str())
+    .bind(worktree_path)
     .execute(pool)
     .await?;
     Ok(())
@@ -155,7 +167,7 @@ pub async fn get_session_by_thread(
     let tid = thread_id.get() as i64;
     let row: Option<SessionRow> = sqlx::query_as(
         "SELECT id, thread_id, user_id, claude_session_id, project, status,
-                created_at, last_active_at
+                created_at, last_active_at, worktree_path
          FROM sessions WHERE thread_id = ? AND status IN (?, ?)",
     )
     .bind(tid)
@@ -173,6 +185,7 @@ pub async fn get_session_by_thread(
         claude_session_id: r.claude_session_id.map(|s| ClaudeSessionId::new(&s)),
         project: Arc::from(r.project.as_str()),
         created_at: r.created_at.parse().unwrap_or_default(),
+        worktree_path: r.worktree_path.map(|s| Arc::from(s.as_str())),
     }))
 }
 

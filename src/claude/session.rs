@@ -16,6 +16,7 @@ struct ActiveSession {
     started_at: Instant,
     claude_session_id: Option<ClaudeSessionId>,
     project_cwd: PathBuf,
+    worktree_path: Option<PathBuf>,
 }
 
 pub struct SessionManager {
@@ -51,6 +52,7 @@ impl SessionManager {
         thread_id: ThreadId,
         handle: ClaudeProcessHandle,
         cwd: PathBuf,
+        worktree_path: Option<PathBuf>,
     ) -> Result<(), AppError> {
         if self.active.len() >= self.config.claude.max_sessions {
             tokio::spawn(async move {
@@ -65,6 +67,7 @@ impl SessionManager {
                 started_at: Instant::now(),
                 claude_session_id: None,
                 project_cwd: cwd,
+                worktree_path,
             },
         );
         Ok(())
@@ -87,8 +90,10 @@ impl SessionManager {
         self.active.get(&thread_id).map(|e| e.project_cwd.clone())
     }
 
-    pub fn remove(&self, thread_id: ThreadId) -> Option<ClaudeProcessHandle> {
-        self.active.remove(&thread_id).map(|(_, s)| s.handle)
+    pub fn remove(&self, thread_id: ThreadId) -> Option<(ClaudeProcessHandle, Option<PathBuf>)> {
+        self.active
+            .remove(&thread_id)
+            .map(|(_, s)| (s.handle, s.worktree_path))
     }
 
     /// Queue a follow-up message for a busy session.
@@ -134,6 +139,9 @@ impl SessionManager {
         for tid in keys {
             if let Some((_, session)) = self.active.remove(&tid) {
                 let _ = session.handle.kill().await;
+                if let Some(ref wt) = session.worktree_path {
+                    super::worktree::remove_worktree(wt).await;
+                }
                 tracing::info!(?tid, "killed session on shutdown");
             }
         }
@@ -154,6 +162,9 @@ impl SessionManager {
         for tid in &expired {
             if let Some((_, session)) = self.active.remove(tid) {
                 let _ = session.handle.kill().await;
+                if let Some(ref wt) = session.worktree_path {
+                    super::worktree::remove_worktree(wt).await;
+                }
                 tracing::info!(?tid, "reaped expired session");
             }
         }

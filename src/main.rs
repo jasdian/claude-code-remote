@@ -31,6 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect(config.database.url.as_ref()).await?;
     claude_remote_chat::db::run_migrations(&pool).await?;
 
+    // Clean up orphaned worktrees from previous crash/shutdown
+    claude_remote_chat::claude::worktree::cleanup_orphaned(&pool).await;
+
     // Build shared state
     let config = Arc::new(config);
     let shutdown = CancellationToken::new();

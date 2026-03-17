@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
@@ -121,6 +120,7 @@ pub async fn handle_message(
             &prompt,
             Some(&session.project),
             session.claude_session_id.as_ref().map(|s| s.as_str()),
+            session.worktree_path.as_deref(),
         )
         .await;
     }
@@ -130,9 +130,9 @@ pub async fn handle_message(
         tracing::info!(user = msg.author.name, "new DM session");
 
         let cwd = state.config.claude.resolve_cwd(None).await?;
-        let project_name = crate::project_name_from_cwd(Path::new(cwd.as_ref()));
-        crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
-        return start_claude(ctx, msg, state, thread_id, &prompt, None, None).await;
+        let project_name = crate::project_name_from_cwd(std::path::Path::new(cwd.as_ref()));
+        crate::db::create_session(&state.db, thread_id, user_id, project_name, None).await?;
+        return start_claude(ctx, msg, state, thread_id, &prompt, None, None, None).await;
     }
 
     Ok(())
@@ -148,6 +148,7 @@ fn parse_interrupt(prompt: &str) -> (bool, &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_claude(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -156,22 +157,24 @@ async fn start_claude(
     prompt: &str,
     project: Option<&str>,
     resume_id: Option<&str>,
+    existing_worktree: Option<&str>,
 ) -> Result<(), AppError> {
     let config = &state.config.claude;
-    let cwd_str = config.resolve_cwd(project).await?;
-    let cwd = Path::new(cwd_str.as_ref());
+    let (cwd, worktree_path) =
+        crate::claude::worktree::resolve_session_cwd(config, project, thread_id, existing_worktree)
+            .await?;
     let tools = config.resolve_tools(project);
 
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
     let handle =
-        crate::claude::process::run_claude(config, prompt, resume_id, cwd, &tools, tx, cancel)
+        crate::claude::process::run_claude(config, prompt, resume_id, &cwd, &tools, tx, cancel)
             .await?;
 
     state
         .session_manager
-        .register(thread_id, handle, cwd.to_path_buf())?;
+        .register(thread_id, handle, cwd, worktree_path)?;
     crate::db::touch_session(&state.db, thread_id).await?;
 
     let stream_cancel = state.shutdown.child_token();

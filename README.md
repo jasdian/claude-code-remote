@@ -57,7 +57,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - `/end` archives the thread after stopping the session
 
 **Claude Code Management**
-- Subprocess lifecycle via `tokio::process` with bidirectional stdin/stdout (`--input-format stream-json`)
+- Subprocess lifecycle via `tokio::process` with `--output-format stream-json`
 - Streaming `stream-json` parser for real-time output
 - `control_request` handling — interactive permission prompts and user questions routed through Discord
 - Multi-turn conversations via `--resume SESSION_ID`
@@ -65,6 +65,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
 - **Full tool audit trail** — every tool invocation logged to SQLite with full input JSON, result preview, error status, and duration
+- **Git worktree isolation** — optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
 - Session timeout and automatic cleanup
 - stderr capture — Claude process errors are logged and surfaced to Discord
 
@@ -174,10 +175,12 @@ max_sessions = 3                                     # Max concurrent sessions
 session_timeout_minutes = 30                         # Auto-kill after inactivity
 # system_prompt = "Keep responses concise."          # Optional system prompt
 # dangerously_skip_permissions = false               # Skip all permission prompts
+# use_worktrees = false                              # Git worktree per session
 
 [claude.projects.myapp]                              # Named project overrides
 cwd = "/home/you/projects/myapp"
 # allowed_tools = ["Read", "Grep"]                   # Restrict tools per project
+# use_worktrees = true                               # Override per project
 
 [auth]
 admins = [123456789012345678]                        # Can /approve, /revoke, /pending
@@ -354,10 +357,8 @@ Potential future features:
 - **Session list with details** — Enhance `/sessions` to show thread links, project names, and session age
 - **Multi-user session sharing** — Allow other authorized users to interact with a session in the same thread; adjust audit (new table?), to handle user requests and their messages
 - **File attachment support** — Send files/images via Discord attachments for Claude to read
-- **Git worktree per session** — Isolate concurrent sessions working on the same project
 - **Reaction-based permission approval** — Use Discord reaction buttons instead of text replies for permission prompts
 - **Thread aware follow-up warnings** - regarding issue `Follow-up messages start new conversations` - backend follows with additional message, asks user about new conversation (backend waits for user answer, timeout)
-- **Extend `tool-uses` audit log** - add missing information, like `duration_ms`, `result_preview` and others.
 - **`/health` endpoint** - to enable monitoring status of the service. Simple `Axum` or `Hyper` crate usage.
 - **Claude code binary** - change container & the way Claude is installed. Get inspired by the `shell.nix`. Claude is now installed as a standalone binary app.
 

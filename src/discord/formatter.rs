@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
@@ -92,12 +91,17 @@ pub async fn stream_to_discord(
 
         let config = &state.config.claude;
         let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
-        let cwd_result = config.resolve_cwd(Some(&session.project)).await;
-        let Ok(cwd_str) = cwd_result else {
+        let cwd_result = crate::claude::worktree::resolve_session_cwd(
+            config,
+            Some(&session.project),
+            thread_id,
+            session.worktree_path.as_deref(),
+        )
+        .await;
+        let Ok((cwd, worktree_path)) = cwd_result else {
             tracing::error!(?thread_id, "could not resolve cwd for pending messages");
             break;
         };
-        let cwd = Path::new(cwd_str.as_ref());
         let tools = config.resolve_tools(Some(&session.project));
 
         let (tx, new_rx) = crate::claude::process::event_channel();
@@ -107,7 +111,7 @@ pub async fn stream_to_discord(
             config,
             &combined,
             resume_id,
-            cwd,
+            &cwd,
             &tools,
             tx,
             process_cancel,
@@ -127,7 +131,7 @@ pub async fn stream_to_discord(
 
         if let Err(e) = state
             .session_manager
-            .register(thread_id, handle, cwd.to_path_buf())
+            .register(thread_id, handle, cwd, worktree_path)
         {
             tracing::error!(?thread_id, error = %e, "failed to register session for queued messages");
             break;

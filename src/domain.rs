@@ -73,6 +73,7 @@ pub struct Session {
     pub claude_session_id: Option<ClaudeSessionId>,
     pub project: Arc<str>,
     pub created_at: DateTime<Utc>,
+    pub worktree_path: Option<Arc<str>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
