@@ -87,7 +87,8 @@ pub async fn claude(
     let cancel = state.shutdown.child_token();
 
     let handle =
-        crate::claude::process::run_claude(config, &prompt, None, &cwd, &tools, tx, cancel).await?;
+        crate::claude::process::run_claude(config, &prompt, None, &cwd, &tools, None, tx, cancel)
+            .await?;
 
     // DB write first — borrows worktree_path; register() moves it after.
     let user_id = UserId::from(ctx.author().id);
@@ -150,33 +151,26 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
     }
 
     // Resolve worktree path from either active session or DB
-    let wt_path: Option<std::path::PathBuf> = if let Some((handle, wt_path)) =
-        ctx.data().session_manager.remove(thread_id)
-    {
-        handle.kill().await?;
-        wt_path
-    } else {
-        session
-            .as_ref()
-            .and_then(|s| s.worktree_path.as_deref())
-            .map(std::path::PathBuf::from)
-    };
+    let wt_path: Option<std::path::PathBuf> =
+        if let Some((handle, wt_path)) = ctx.data().session_manager.remove(thread_id) {
+            handle.kill().await?;
+            wt_path
+        } else {
+            session
+                .as_ref()
+                .and_then(|s| s.worktree_path.as_deref())
+                .map(std::path::PathBuf::from)
+        };
 
     let had_session = session.is_some();
 
     if had_session {
         // Try auto-PR before cleaning up the worktree
         let project = session.as_ref().map(|s| s.project.as_ref()).unwrap_or("");
-        let auto_pr = ctx
-            .data()
-            .config
-            .claude
-            .resolve_auto_pr(Some(project));
+        let auto_pr = ctx.data().config.claude.resolve_auto_pr(Some(project));
         let mut pr_url: Option<String> = None;
 
-        if auto_pr
-            && let Some(ref wt) = wt_path
-        {
+        if auto_pr && let Some(ref wt) = wt_path {
             pr_url = crate::claude::worktree::try_create_pr(wt, project).await;
         }
 
@@ -383,9 +377,10 @@ async fn send_session_command(
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
-    let handle =
-        crate::claude::process::run_claude(config, cli_cmd, resume_id, &cwd, &tools, tx, cancel)
-            .await?;
+    let handle = crate::claude::process::run_claude(
+        config, cli_cmd, resume_id, &cwd, &tools, None, tx, cancel,
+    )
+    .await?;
 
     // Persist worktree path to DB before register() moves it (P1: borrow first, move last)
     if let Some(ref wt) = worktree_path

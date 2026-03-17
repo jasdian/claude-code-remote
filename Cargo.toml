@@ -1,6 +1,6 @@
 [package]
-name = "claude-remote-chat"
-version = "0.5.0"
+name = "claude-crew"
+version = "0.6.0"
 edition = "2024"
 authors = ["jasdian <business@quantdevlabs.com>"]
 license = "MIT"

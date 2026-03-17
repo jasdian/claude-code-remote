@@ -57,7 +57,7 @@ cargo init
 
 ```toml
 [package]
-name = "claude-remote-chat"
+name = "claude-crew"
 version = "0.1.0"
 edition = "2021"
 
@@ -1651,7 +1651,7 @@ See Phase 6 (main.rs) -- spawned as a background task with CancellationToken.
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use claude_remote_chat::{
+use claude_crew::{
     AppState,
     config::AppConfig,
     claude::session::SessionManager,
@@ -1735,7 +1735,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 7. Start Discord bot (blocks until shutdown) ──
     tracing::info!("starting discord bot");
-    claude_remote_chat::discord::start_bot(state).await?;
+    claude_crew::discord::start_bot(state).await?;
 
     tracing::info!("shutdown complete");
     Ok(())
@@ -1824,7 +1824,7 @@ serenity handles rate limiting internally. The accumulator/chunking approach bat
 ---
 
 ### Critical Files for Implementation
-- `/home/john/dump/git-repos/git-moje/claude-remote-chat/PLAN.md` - The file to be replaced with this redesigned plan
-- `/home/john/dump/git-repos/git-moje/claude-remote-chat/CLAUDE.md` - Project instructions that define the architecture and module structure (keep in sync)
-- `/home/john/dump/git-repos/git-moje/claude-remote-chat/shell.nix` - Dev environment; already correct, no changes needed
-- `/home/john/dump/git-repos/git-moje/claude-remote-chat/README.md` - Public docs referencing PLAN.md; may need minor updates to mention new deps (dashmap, smallvec, tokio-util)
+- `/home/john/dump/git-repos/git-moje/claude-crew/PLAN.md` - The file to be replaced with this redesigned plan
+- `/home/john/dump/git-repos/git-moje/claude-crew/CLAUDE.md` - Project instructions that define the architecture and module structure (keep in sync)
+- `/home/john/dump/git-repos/git-moje/claude-crew/shell.nix` - Dev environment; already correct, no changes needed
+- `/home/john/dump/git-repos/git-moje/claude-crew/README.md` - Public docs referencing PLAN.md; may need minor updates to mention new deps (dashmap, smallvec, tokio-util)

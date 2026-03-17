@@ -61,6 +61,16 @@ struct RawAuthConfig {
     allowed_roles: Vec<u64>,
     #[serde(default)]
     admins: Vec<u64>,
+    /// Map Discord user IDs to Git identities for Co-Authored-By trailers.
+    /// Keys are stringified u64 IDs (TOML limitation for table keys).
+    #[serde(default)]
+    user_identities: HashMap<String, RawUserIdentity>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUserIdentity {
+    github_username: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +161,14 @@ pub struct AuthConfig {
     pub allowed_users: SmallVec<[u64; 4]>,
     pub allowed_roles: SmallVec<[u64; 4]>,
     pub admins: SmallVec<[u64; 4]>,
+    /// Discord user ID → Git identity for Co-Authored-By trailers.
+    pub user_identities: HashMap<u64, UserIdentity>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserIdentity {
+    pub github_username: Option<Arc<str>>,
+    pub email: Option<Arc<str>>,
 }
 
 #[derive(Debug)]
@@ -282,6 +300,30 @@ impl AppConfig {
                 allowed_users: raw.auth.allowed_users.into_iter().collect(),
                 allowed_roles: raw.auth.allowed_roles.into_iter().collect(),
                 admins: raw.auth.admins.into_iter().collect(),
+                user_identities: raw
+                    .auth
+                    .user_identities
+                    .into_iter()
+                    .filter_map(|(k, v)| {
+                        let id: u64 = match k.parse() {
+                            Ok(id) => id,
+                            Err(_) => {
+                                tracing::warn!(
+                                    key = k,
+                                    "ignoring user_identities entry: key is not a valid u64 Discord ID"
+                                );
+                                return None;
+                            }
+                        };
+                        Some((
+                            id,
+                            UserIdentity {
+                                github_username: v.github_username.map(|s| Arc::from(s.as_str())),
+                                email: v.email.map(|s| Arc::from(s.as_str())),
+                            },
+                        ))
+                    })
+                    .collect(),
             },
             logging: LoggingConfig {
                 level: Arc::from(raw.logging.level.as_str()),

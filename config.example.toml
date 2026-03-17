@@ -41,6 +41,13 @@ admins = [123456789012345678]          # Can /approve, /revoke, /pending
 allowed_users = [123456789012345678]   # Always authorized (config-managed)
 allowed_roles = []                     # Always authorized (by role)
 
+# Map Discord users to Git identities for Co-Authored-By commit trailers.
+# In collaborative sessions with 2+ mapped participants, Claude will append
+# Co-Authored-By lines to git commits automatically.
+# [auth.user_identities.123456789012345678]
+# github_username = "octocat"
+# email = "octocat@github.com"
+
 [database]
 url = "sqlite:data.db?mode=rwc"
 

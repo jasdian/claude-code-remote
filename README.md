@@ -1,6 +1,6 @@
 <div align="center">
 
-# claude-remote-chat
+# Claude Crew
 
 **Collaborate with Claude Code as a team -- one Discord thread, multiple minds.**
 
@@ -24,7 +24,7 @@ Claude Crew turns Claude Code into a **shared, real-time experience**. One perso
 
 ```
 Alice (laptop)  --+
-                  |    Discord Thread     claude-remote-chat (Rust)     Claude Code CLI
+                  |    Discord Thread     Claude Crew (Rust)             Claude Code CLI
 Bob   (phone)   --+--> #refactor-auth --> session manager          --> claude -p
 Carol (tablet)  --+                       (per-user attribution)       (your machine)
 ```
@@ -281,13 +281,13 @@ The bot can be containerized using the pre-built static binary pattern.
 
 ```bash
 cargo build --release --no-default-features --target x86_64-unknown-linux-musl
-cp target/x86_64-unknown-linux-musl/release/claude-remote-chat .
+cp target/x86_64-unknown-linux-musl/release/claude-crew .
 ```
 
 ### 2. Build the Image
 
 ```bash
-docker build -t claude-remote-chat .
+docker build -t claude-crew .
 ```
 
 The image uses `debian:bookworm-slim` as the base and installs Claude Code as a standalone binary (no Node.js required).
@@ -323,14 +323,14 @@ docker compose up -d
 
 # Or standalone
 docker run -d \
-  --name claude-remote-chat \
+  --name claude-crew \
   --restart unless-stopped \
   -e ANTHROPIC_API_KEY \
   -v claude-data:/data \
   -v claude-state:/home/appuser/.claude \
   -v ./config.prod.toml:/app/config.toml:ro \
   -v /path/to/your/projects:/projects \
-  claude-remote-chat
+  claude-crew
 ```
 
 ### Volumes

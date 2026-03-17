@@ -3,9 +3,9 @@ use std::sync::Arc;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 
-use claude_remote_chat::AppState;
-use claude_remote_chat::claude::session::SessionManager;
-use claude_remote_chat::config::AppConfig;
+use claude_crew::AppState;
+use claude_crew::claude::session::SessionManager;
+use claude_crew::config::AppConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,11 +35,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .pragma("journal_mode", "WAL")
         .pragma("foreign_keys", "ON");
     let pool = sqlx::SqlitePool::connect_with(pool_opts).await?;
-    claude_remote_chat::db::run_migrations(&pool).await?;
+    claude_crew::db::run_migrations(&pool).await?;
 
     // Reconcile sessions left "active" by a previous crash/shutdown —
     // mark them "idle" so they can be resumed on the next message.
-    let reconciled = claude_remote_chat::db::reconcile_stale_sessions(&pool).await?;
+    let reconciled = claude_crew::db::reconcile_stale_sessions(&pool).await?;
     if reconciled > 0 {
         tracing::info!(
             count = reconciled,
@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean up orphaned worktrees from previous crash/shutdown
-    claude_remote_chat::claude::worktree::cleanup_orphaned(&pool).await;
+    claude_crew::claude::worktree::cleanup_orphaned(&pool).await;
 
     // Build shared state
     let config = Arc::new(config);
@@ -77,8 +77,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !reaped.is_empty() {
                         tracing::info!(count = reaped.len(), "reaped expired sessions");
                         for tid in reaped {
-                            let _ = claude_remote_chat::db::update_session_status(
-                                &reaper_state.db, tid, claude_remote_chat::domain::SessionStatus::Expired,
+                            let _ = claude_crew::db::update_session_status(
+                                &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
                             ).await;
                         }
                     }
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn Discord bot as a separate task (Tokio recommended pattern)
     tracing::info!("starting discord bot");
-    let bot_handle = tokio::spawn(claude_remote_chat::discord::start_bot(Arc::clone(&state)));
+    let bot_handle = tokio::spawn(claude_crew::discord::start_bot(Arc::clone(&state)));
 
     // Wait for shutdown signal in main task
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())

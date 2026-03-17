@@ -127,6 +127,7 @@ pub async fn stream_to_discord(
             resume_id,
             &cwd,
             &tools,
+            None, // queued follow-ups don't rebuild co-author prompt
             tx,
             process_cancel,
         )
@@ -281,6 +282,12 @@ async fn stream_events(
                         let _ = crate::db::update_session_id(
                             &state.db, thread_id, sid.as_str()
                         ).await;
+                    }
+                    Some(ClaudeEvent::ExitError(reason)) => {
+                        if let Some(msg) = reason.user_message() {
+                            sent_any = true;
+                            send_message(http, channel_id, &msg).await;
+                        }
                     }
                     Some(ClaudeEvent::Error(e)) => {
                         sent_any = true;

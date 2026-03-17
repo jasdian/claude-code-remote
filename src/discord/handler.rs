@@ -4,7 +4,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::AppState;
-use crate::domain::{SessionStatus, ThreadId, UserId, UserMessage};
+use crate::domain::{self, SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 
 /// Best-effort reaction — log on failure but never abort the handler.
@@ -318,12 +318,38 @@ async fn start_claude(
             .await?;
     let tools = config.resolve_tools(project);
 
+    // Build combined system prompt: config base + co-author trailers for multi-user sessions
+    let coauthor_block = match crate::db::get_participants(&state.db, thread_id).await {
+        Ok(participants) => {
+            domain::build_coauthor_prompt(&participants, &state.config.auth.user_identities)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to fetch participants for co-author prompt");
+            None
+        }
+    };
+
+    let combined_prompt = match (&config.system_prompt, &coauthor_block) {
+        (Some(base), Some(coauthor)) => Some(format!("{base}\n\n{coauthor}")),
+        (None, Some(coauthor)) => Some(coauthor.clone()),
+        (Some(_), None) => None, // use config default via None override
+        (None, None) => None,
+    };
+
     let (tx, rx) = crate::claude::process::event_channel();
     let cancel = state.shutdown.child_token();
 
-    let handle =
-        crate::claude::process::run_claude(config, prompt, resume_id, &cwd, &tools, tx, cancel)
-            .await?;
+    let handle = crate::claude::process::run_claude(
+        config,
+        prompt,
+        resume_id,
+        &cwd,
+        &tools,
+        combined_prompt.as_deref(),
+        tx,
+        cancel,
+    )
+    .await?;
 
     // Persist worktree path to DB before register() moves it (P1: borrow first, move last)
     if let Some(ref wt) = worktree_path

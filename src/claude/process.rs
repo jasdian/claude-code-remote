@@ -3,31 +3,31 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::ClaudeConfig;
-use crate::domain::ClaudeEvent;
+use crate::domain::{ClaudeEvent, ClaudeExitReason};
 use crate::error::AppError;
 
 const STDOUT_BUF_CAPACITY: usize = 8 * 1024;
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 pub struct ClaudeProcessHandle {
-    child: Child,
     reader_task: JoinHandle<()>,
     cancel: CancellationToken,
 }
 
 impl ClaudeProcessHandle {
-    pub async fn kill(mut self) -> Result<(), AppError> {
+    /// Kill the process. Cancels the reader task, which drops the child
+    /// (triggering `kill_on_drop`).
+    pub async fn kill(self) -> Result<(), AppError> {
         self.cancel.cancel();
         self.reader_task.abort();
-        let _ = self.child.kill().await;
-        // Reap the zombie — with timeout to avoid hanging on shutdown
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
+        // The child lives inside the reader task — aborting drops it,
+        // and kill_on_drop(true) ensures the process is killed.
         Ok(())
     }
 
@@ -48,12 +48,16 @@ pub fn event_channel() -> (mpsc::Sender<ClaudeEvent>, mpsc::Receiver<ClaudeEvent
 }
 
 /// P4: All IO is async. P1: borrows config and prompt, never clones.
+/// `system_prompt_override`: if Some, replaces the config system_prompt entirely
+/// (used to append co-author trailers for multi-user sessions).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_claude(
     config: &ClaudeConfig,
     prompt: &str,
     session_id: Option<&str>,
     cwd: &Path,
     allowed_tools: &[Arc<str>],
+    system_prompt_override: Option<&str>,
     event_tx: mpsc::Sender<ClaudeEvent>,
     cancel: CancellationToken,
 ) -> Result<ClaudeProcessHandle, AppError> {
@@ -81,8 +85,10 @@ pub async fn run_claude(
         cmd.arg("--resume").arg(sid);
     }
 
-    if let Some(ref sys_prompt) = config.system_prompt {
-        cmd.arg("--append-system-prompt").arg(sys_prompt.as_ref());
+    // System prompt: override wins (includes co-author trailers), else config default
+    let effective_prompt = system_prompt_override.or(config.system_prompt.as_deref());
+    if let Some(sys_prompt) = effective_prompt {
+        cmd.arg("--append-system-prompt").arg(sys_prompt);
     }
 
     cmd.current_dir(cwd)
@@ -101,9 +107,16 @@ pub async fn run_claude(
         "spawning claude process",
     );
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| AppError::claude(&format!("failed to spawn claude: {e}")))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            let reason = ClaudeExitReason::classify(Some(&e), None, "");
+            tracing::error!(?reason, error = %e, "failed to spawn claude");
+            // Error propagates to the caller (command handler) which displays it.
+            // Don't send events — the formatter task isn't spawned on Err return.
+            return Err(AppError::claude(&format!("failed to spawn claude: {e}")));
+        }
+    };
 
     let stdout = child
         .stdout
@@ -116,7 +129,11 @@ pub async fn run_claude(
         .ok_or_else(|| AppError::claude("no stderr from claude process"))?;
 
     let reader_cancel = cancel.clone();
+    // Move child into the reader task so we can wait() and classify exit.
+    // kill_on_drop(true) ensures cleanup if the task is aborted.
     let reader_task = tokio::spawn(async move {
+        let mut child = child;
+
         // Spawn stderr reader to capture error output
         let stderr_task = tokio::spawn(async move {
             let reader = BufReader::new(stderr);
@@ -168,22 +185,42 @@ pub async fn run_claude(
             }
         }
 
-        // If we got no events, check stderr for error details
-        if !got_events && let Ok(stderr_output) = stderr_task.await {
-            if !stderr_output.is_empty() {
-                tracing::error!(stderr = %stderr_output, "claude process produced no events");
-                let _ = event_tx
-                    .send(ClaudeEvent::Error(
-                        format!("claude error: {stderr_output}").into_boxed_str(),
-                    ))
-                    .await;
-            } else {
-                tracing::error!("claude process produced no output at all");
-                let _ = event_tx
-                    .send(ClaudeEvent::Error(
-                        "claude process exited with no output".into(),
-                    ))
-                    .await;
+        // Wait for child exit and collect stderr (skip if cancelled/killed)
+        if !reader_cancel.is_cancelled() {
+            let stderr_output = stderr_task.await.unwrap_or_default();
+            let exit_status =
+                tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+
+            let exit_code = match exit_status {
+                Ok(Ok(status)) => status.code(),
+                Ok(Err(_)) | Err(_) => None,
+            };
+
+            let reason = ClaudeExitReason::classify(None, exit_code, &stderr_output);
+
+            match &reason {
+                ClaudeExitReason::Success => {}
+                other => {
+                    tracing::error!(?other, "claude process exited with error");
+                    let _ = event_tx.send(ClaudeEvent::ExitError(reason)).await;
+                }
+            }
+
+            // Legacy fallback: if no events and no ExitError was sent, send Error
+            if !got_events && exit_code == Some(0) {
+                if !stderr_output.is_empty() {
+                    let _ = event_tx
+                        .send(ClaudeEvent::Error(
+                            format!("claude error: {stderr_output}").into_boxed_str(),
+                        ))
+                        .await;
+                } else {
+                    let _ = event_tx
+                        .send(ClaudeEvent::Error(
+                            "claude process exited with no output".into(),
+                        ))
+                        .await;
+                }
             }
         }
 
@@ -191,7 +228,6 @@ pub async fn run_claude(
     });
 
     Ok(ClaudeProcessHandle {
-        child,
         reader_task,
         cancel,
     })

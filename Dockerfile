@@ -5,12 +5,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY claude-remote-chat /app/claude-remote-chat
+COPY claude-crew /app/claude-crew
 
 RUN useradd -r -m appuser \
     && mkdir -p /data /projects \
     && chown appuser:appuser /data /projects /app \
-    && chmod +x /app/claude-remote-chat
+    && chmod +x /app/claude-crew
 
 USER appuser
 
@@ -19,4 +19,4 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-ENTRYPOINT ["/app/claude-remote-chat"]
+ENTRYPOINT ["/app/claude-crew"]

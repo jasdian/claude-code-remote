@@ -201,8 +201,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "claude-remote-chat"
-version = "0.5.0"
+name = "claude-crew"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "dashmap 6.1.0",

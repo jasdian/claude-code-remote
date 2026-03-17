@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Deploy — Build, Ship, Restart
 
-Deploy the claude-remote-chat bot to production.
+Deploy the claude-crew bot to production.
 
 ## Steps
 
@@ -30,7 +30,7 @@ Before deploying, show:
 ### 4. Deploy via SSH
 ```bash
 # Copy binary
-scp target/x86_64-unknown-linux-musl/release/claude-remote-chat user@server:/path/
+scp target/x86_64-unknown-linux-musl/release/claude-crew user@server:/path/
 
 # Copy config if changed
 scp config.toml user@server:/path/config.toml
@@ -40,13 +40,13 @@ Adjust paths based on user input or existing deployment config.
 
 ### 5. Restart Service
 ```bash
-ssh user@server "sudo systemctl restart claude-remote-chat"
+ssh user@server "sudo systemctl restart claude-crew"
 ```
 
 ### 6. Verify
 ```bash
-ssh user@server "systemctl status claude-remote-chat"
-ssh user@server "journalctl -u claude-remote-chat -n 20 --no-pager"
+ssh user@server "systemctl status claude-crew"
+ssh user@server "journalctl -u claude-crew -n 20 --no-pager"
 ```
 
 Check that the bot connects to Discord (look for "bot ready" in logs).
