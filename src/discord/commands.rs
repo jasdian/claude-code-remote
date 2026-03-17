@@ -264,11 +264,13 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
-#[poise::command(slash_command)]
-pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
-    ctx.defer().await?;
-    check_auth(&ctx).await?;
-
+/// Send a Claude CLI internal command (e.g. /compact, /context) to the session.
+async fn send_session_command(
+    ctx: &Context<'_>,
+    cli_cmd: &str,
+    status_msg: &str,
+    queue_msg: &str,
+) -> Result<(), AppError> {
     let state = ctx.data();
     let thread_id = ThreadId::from(ctx.channel_id());
 
@@ -278,16 +280,16 @@ pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
         return Ok(());
     };
 
-    // If busy, queue the compact command
+    // If busy, queue the command
     if state.session_manager.has_session(thread_id) {
         state
             .session_manager
-            .queue_message(thread_id, "/compact".to_string());
-        ctx.say("📨 _Compact queued._").await?;
+            .queue_message(thread_id, cli_cmd.to_string());
+        ctx.say(queue_msg).await?;
         return Ok(());
     }
 
-    // Resume with /compact
+    // Resume with the CLI command
     let config = &state.config.claude;
     let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
     let cwd_str = config.resolve_cwd(Some(&session.project)).await?;
@@ -298,7 +300,7 @@ pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
     let cancel = state.shutdown.child_token();
 
     let handle =
-        crate::claude::process::run_claude(config, "/compact", resume_id, cwd, &tools, tx, cancel)
+        crate::claude::process::run_claude(config, cli_cmd, resume_id, cwd, &tools, tx, cancel)
             .await?;
 
     state
@@ -306,7 +308,7 @@ pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
         .register(thread_id, handle, cwd.to_path_buf())?;
     crate::db::touch_session(&state.db, thread_id).await?;
 
-    ctx.say("_Compacting conversation..._").await?;
+    ctx.say(status_msg).await?;
 
     let stream_cancel = state.shutdown.child_token();
     tokio::spawn(super::formatter::stream_to_discord(
@@ -318,6 +320,20 @@ pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
     ));
 
     Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_auth(&ctx).await?;
+    send_session_command(&ctx, "/compact", "_Compacting conversation..._", "📨 _Compact queued._").await
+}
+
+#[poise::command(slash_command)]
+pub async fn context(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_auth(&ctx).await?;
+    send_session_command(&ctx, "/context", "_Fetching context info..._", "📨 _Context queued._").await
 }
 
 #[poise::command(slash_command)]

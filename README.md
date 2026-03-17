@@ -208,6 +208,7 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | `/interrupt [prompt]` | Session thread | Kill current task, optionally send new prompt |
 | `!message` | Session thread | Interrupt current task and send message |
 | `/compact` | Session thread | Summarize conversation to reduce context usage |
+| `/context` | Session thread | Show current context window and token usage |
 | `/end` | Session thread | Stop session and archive the thread |
 | `/sessions` | Anywhere | Show active session count |
 
