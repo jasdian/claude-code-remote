@@ -1,0 +1,16 @@
+{
+  "projectName": "claude-remote-chat",
+  "projectOwner": "jasdian",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": ["README.md"],
+  "contributors": [
+    {
+      "login": "jasdian",
+      "name": "Adrian Jastrzębski",
+      "avatar_url": "https://github.com/jasdian.png",
+      "profile": "https://github.com/jasdian",
+      "contributions": ["*"]
+    }
+  ]
+}
