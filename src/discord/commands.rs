@@ -153,9 +153,7 @@ pub async fn interrupt(
     }
 
     if let Some(msg) = prompt {
-        ctx.data()
-            .session_manager
-            .queue_message(thread_id, msg);
+        ctx.data().session_manager.queue_message(thread_id, msg);
     }
 
     ctx.data().session_manager.interrupt(thread_id);
@@ -201,7 +199,8 @@ pub async fn optin(ctx: Context<'_>) -> Result<(), AppError> {
     }
 
     crate::db::create_access_request(&state.db, user_id, &ctx.author().name).await?;
-    ctx.say("Access requested. An admin will review it.").await?;
+    ctx.say("Access requested. An admin will review it.")
+        .await?;
     Ok(())
 }
 
@@ -326,14 +325,26 @@ async fn send_session_command(
 pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
     check_auth(&ctx).await?;
-    send_session_command(&ctx, "/compact", "_Compacting conversation..._", "📨 _Compact queued._").await
+    send_session_command(
+        &ctx,
+        "/compact",
+        "_Compacting conversation..._",
+        "📨 _Compact queued._",
+    )
+    .await
 }
 
 #[poise::command(slash_command)]
 pub async fn context(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
     check_auth(&ctx).await?;
-    send_session_command(&ctx, "/context", "_Fetching context info..._", "📨 _Context queued._").await
+    send_session_command(
+        &ctx,
+        "/context",
+        "_Fetching context info..._",
+        "📨 _Context queued._",
+    )
+    .await
 }
 
 #[poise::command(slash_command)]
@@ -341,35 +352,96 @@ pub async fn audit(
     ctx: Context<'_>,
     #[description = "Tool use ID (omit for latest)"] id: Option<i64>,
     #[description = "Number of entries to show"] count: Option<i64>,
+    #[description = "Show full detail for a specific ID"] detail: Option<bool>,
 ) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
     check_admin(&ctx)?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
+
+    // Detail mode: show full input_json for a specific ID
+    if detail.unwrap_or(false) {
+        let target_id = id.unwrap_or(0);
+        return audit_detail(&ctx, target_id).await;
+    }
+
     let n = count.unwrap_or(1).clamp(1, 50);
     let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id, id, n).await?;
     if rows.is_empty() {
         ctx.say("No tool uses found.").await?;
     } else {
         let mut out = String::new();
-        for (row_id, tool, preview, ts) in &rows {
-            let preview_str = if preview.is_empty() {
+        for row in &rows {
+            let preview_str = if row.input_preview.is_empty() {
                 String::new()
             } else {
-                format!(" — `{preview}`")
+                format!(" — `{}`", row.input_preview)
             };
-            out.push_str(&format!("`#{row_id}` **{tool}**{preview_str} ({ts})\n"));
+            let error_marker = if row.is_error { " ❌" } else { "" };
+            let duration_str = row
+                .duration_ms
+                .map(|ms| format!(" {ms}ms"))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "`#{}` **{}**{preview_str}{error_marker}{duration_str} ({})\n",
+                row.id, row.tool, row.created_at
+            ));
         }
-        // Chunk if over Discord limit
-        if out.len() > 2000 {
-            let mut rest = out.as_str();
-            while !rest.is_empty() {
-                let end = if rest.len() <= 1990 { rest.len() } else { rest.floor_char_boundary(1990) };
-                let (chunk, tail) = rest.split_at(end);
-                rest = tail;
-                ctx.channel_id().say(ctx.http(), chunk).await?;
-            }
-        } else {
-            ctx.say(out).await?;
+        send_ephemeral_chunked(&ctx, &out).await?;
+    }
+    Ok(())
+}
+
+/// Show full audit detail for a single tool use.
+async fn audit_detail(ctx: &Context<'_>, id: i64) -> Result<(), AppError> {
+    let detail = crate::db::get_tool_use_detail(&ctx.data().db, id).await?;
+    let Some(d) = detail else {
+        ctx.say(format!("No tool use found with id `#{id}`"))
+            .await?;
+        return Ok(());
+    };
+
+    let error_marker = if d.is_error { " ❌" } else { "" };
+    let duration_str = d
+        .duration_ms
+        .map(|ms| format!(" ({ms}ms)"))
+        .unwrap_or_default();
+
+    let mut out = format!(
+        "`#{}` **{}**{error_marker}{duration_str} — {}\n",
+        d.id, d.tool, d.created_at
+    );
+
+    if !d.input_json.is_empty() {
+        out.push_str("\n**Input:**\n```json\n");
+        out.push_str(&d.input_json);
+        out.push_str("\n```\n");
+    }
+
+    if !d.result_preview.is_empty() {
+        out.push_str("\n**Result:**\n```\n");
+        out.push_str(&d.result_preview);
+        out.push_str("\n```\n");
+    }
+
+    send_ephemeral_chunked(ctx, &out).await?;
+    Ok(())
+}
+
+/// Send potentially long text as ephemeral chunked messages.
+async fn send_ephemeral_chunked(ctx: &Context<'_>, text: &str) -> Result<(), AppError> {
+    if text.len() <= 2000 {
+        ctx.say(text).await?;
+    } else {
+        let mut rest = text;
+        while !rest.is_empty() {
+            let end = if rest.len() <= 1990 {
+                rest.len()
+            } else {
+                rest.floor_char_boundary(1990)
+            };
+            let (chunk, tail) = rest.split_at(end);
+            rest = tail;
+            ctx.channel_id().say(ctx.http(), chunk).await?;
         }
     }
     Ok(())
@@ -411,9 +483,7 @@ fn thread_name(project: &str, prompt: &str) -> String {
     } else {
         let trunc = budget.saturating_sub(ELLIPSIS.len());
         let end = first_line.floor_char_boundary(trunc);
-        let end = first_line[..end]
-            .rfind(' ')
-            .unwrap_or(end);
+        let end = first_line[..end].rfind(' ').unwrap_or(end);
         format!("{prefix}{}{ELLIPSIS}", &first_line[..end])
     }
 }

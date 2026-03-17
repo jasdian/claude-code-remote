@@ -74,6 +74,15 @@ pub async fn handle_message(
         }
 
         if state.session_manager.has_session(thread_id) {
+            // Check if there's a pending reply waiter (AskUserQuestion / permission)
+            if let Some(reply_tx) = state.session_manager.take_reply_waiter(thread_id) {
+                let _ = reply_tx.send(prompt.to_string());
+                msg.react(ctx, serenity::ReactionType::Unicode("💬".into()))
+                    .await?;
+                tracing::info!(?thread_id, "routed reply to control_request waiter");
+                return Ok(());
+            }
+
             // Session is busy — check for interrupt or queue
             let (is_interrupt, clean_prompt) = parse_interrupt(&prompt);
 

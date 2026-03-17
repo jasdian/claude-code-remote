@@ -99,10 +99,27 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
             .execute(pool)
             .await?;
 
-        sqlx::query("PRAGMA user_version = 1")
+        sqlx::query("PRAGMA user_version = 1").execute(pool).await?;
+        tracing::info!("migration: v0 -> v1 (sessions, access_requests, tool_uses)");
+    }
+
+    if version < 2 {
+        // v1 -> v2: full audit blob storage + result tracking
+        sqlx::query("ALTER TABLE tool_uses ADD COLUMN input_json TEXT NOT NULL DEFAULT ''")
             .execute(pool)
             .await?;
-        tracing::info!("migration: v0 -> v1 (sessions, access_requests, tool_uses)");
+        sqlx::query("ALTER TABLE tool_uses ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+        sqlx::query("ALTER TABLE tool_uses ADD COLUMN result_preview TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await?;
+        sqlx::query("ALTER TABLE tool_uses ADD COLUMN duration_ms INTEGER")
+            .execute(pool)
+            .await?;
+
+        sqlx::query("PRAGMA user_version = 2").execute(pool).await?;
+        tracing::info!("migration: v1 -> v2 (tool_uses audit columns)");
     }
 
     Ok(())
@@ -213,17 +230,62 @@ pub async fn log_tool_use(
     thread_id: ThreadId,
     tool: &str,
     input_preview: &str,
+    input_json: &str,
 ) -> Result<i64, AppError> {
     let tid = thread_id.get() as i64;
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO tool_uses (thread_id, tool, input_preview) VALUES (?, ?, ?) RETURNING id",
+        "INSERT INTO tool_uses (thread_id, tool, input_preview, input_json)
+         VALUES (?, ?, ?, ?) RETURNING id",
     )
     .bind(tid)
     .bind(tool)
     .bind(input_preview)
+    .bind(input_json)
     .fetch_one(pool)
     .await?;
     Ok(id)
+}
+
+pub async fn update_tool_result(
+    pool: &SqlitePool,
+    tool_use_id: i64,
+    is_error: bool,
+    result_preview: &str,
+    duration_ms: Option<i64>,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE tool_uses SET is_error = ?, result_preview = ?, duration_ms = ? WHERE id = ?",
+    )
+    .bind(is_error)
+    .bind(result_preview)
+    .bind(duration_ms)
+    .bind(tool_use_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Row from tool_uses list query.
+pub struct ToolUseRow {
+    pub id: i64,
+    pub tool: String,
+    pub input_preview: String,
+    pub is_error: bool,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for ToolUseRow {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            tool: row.try_get("tool")?,
+            input_preview: row.try_get("input_preview")?,
+            is_error: row.try_get::<i32, _>("is_error").map(|v| v != 0)?,
+            duration_ms: row.try_get("duration_ms")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
 }
 
 pub async fn get_tool_uses(
@@ -231,14 +293,14 @@ pub async fn get_tool_uses(
     thread_id: ThreadId,
     at_id: Option<i64>,
     count: i64,
-) -> Result<Vec<(i64, String, String, String)>, AppError> {
+) -> Result<Vec<ToolUseRow>, AppError> {
     let tid = thread_id.get() as i64;
-    let rows: Vec<(i64, String, String, String)> = match at_id {
+    let rows: Vec<ToolUseRow> = match at_id {
         Some(id) => {
-            // N rows ending at (and including) the given ID
             sqlx::query_as(
-                "SELECT id, tool, input_preview, created_at FROM tool_uses
-                 WHERE thread_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
+                "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+                 FROM tool_uses WHERE thread_id = ? AND id <= ?
+                 ORDER BY id DESC LIMIT ?",
             )
             .bind(tid)
             .bind(id)
@@ -247,10 +309,10 @@ pub async fn get_tool_uses(
             .await?
         }
         None => {
-            // Latest N rows
             sqlx::query_as(
-                "SELECT id, tool, input_preview, created_at FROM tool_uses
-                 WHERE thread_id = ? ORDER BY id DESC LIMIT ?",
+                "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+                 FROM tool_uses WHERE thread_id = ?
+                 ORDER BY id DESC LIMIT ?",
             )
             .bind(tid)
             .bind(count)
@@ -260,6 +322,48 @@ pub async fn get_tool_uses(
     };
     // Results come DESC, reverse to chronological order
     Ok(rows.into_iter().rev().collect())
+}
+
+/// Full detail for a single tool use (includes input_json).
+pub struct ToolUseDetail {
+    pub id: i64,
+    pub tool: String,
+    pub input_preview: String,
+    pub input_json: String,
+    pub is_error: bool,
+    pub result_preview: String,
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for ToolUseDetail {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            tool: row.try_get("tool")?,
+            input_preview: row.try_get("input_preview")?,
+            input_json: row.try_get("input_json")?,
+            is_error: row.try_get::<i32, _>("is_error").map(|v| v != 0)?,
+            result_preview: row.try_get("result_preview")?,
+            duration_ms: row.try_get("duration_ms")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+pub async fn get_tool_use_detail(
+    pool: &SqlitePool,
+    id: i64,
+) -> Result<Option<ToolUseDetail>, AppError> {
+    let row: Option<ToolUseDetail> = sqlx::query_as(
+        "SELECT id, tool, input_preview, input_json, is_error, result_preview,
+                duration_ms, created_at
+         FROM tool_uses WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 // --- Access requests ---
@@ -281,12 +385,10 @@ pub async fn create_access_request(
 }
 
 pub async fn approve_access(pool: &SqlitePool, user_id: u64) -> Result<bool, AppError> {
-    let result = sqlx::query(
-        "UPDATE access_requests SET status = 'approved' WHERE user_id = ?",
-    )
-    .bind(user_id as i64)
-    .execute(pool)
-    .await?;
+    let result = sqlx::query("UPDATE access_requests SET status = 'approved' WHERE user_id = ?")
+        .bind(user_id as i64)
+        .execute(pool)
+        .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -316,5 +418,8 @@ pub async fn get_pending_requests(
     )
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|(id, name, ts)| (id as u64, name, ts)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, ts)| (id as u64, name, ts))
+        .collect())
 }

@@ -24,8 +24,10 @@ pub struct ClaudeProcessHandle {
 impl ClaudeProcessHandle {
     pub async fn kill(mut self) -> Result<(), AppError> {
         self.cancel.cancel();
-        self.child.kill().await?;
         self.reader_task.abort();
+        let _ = self.child.kill().await;
+        // Reap the zombie — with timeout to avoid hanging on shutdown
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), self.child.wait()).await;
         Ok(())
     }
 
@@ -84,9 +86,13 @@ pub async fn run_claude(
     }
 
     cmd.current_dir(cwd)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(true)
+        // P4: Own process group — terminal SIGINT only reaches the bot,
+        // not the Claude subprocess. We manage child lifecycle via CancellationToken.
+        .process_group(0);
 
     tracing::info!(
         binary = config.binary.as_ref(),

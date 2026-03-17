@@ -166,7 +166,10 @@ impl ClaudeConfig {
 
     /// P1/P4: Resolve cwd. Config lookup → sibling directory → error if named project not found.
     /// Returns Cow::Borrowed for config hits, Cow::Owned for discovered sibling paths.
-    pub async fn resolve_cwd(&self, project: Option<&str>) -> Result<Cow<'_, str>, crate::error::AppError> {
+    pub async fn resolve_cwd(
+        &self,
+        project: Option<&str>,
+    ) -> Result<Cow<'_, str>, crate::error::AppError> {
         let Some(name) = project else {
             return Ok(Cow::Borrowed(self.default_cwd.as_ref()));
         };

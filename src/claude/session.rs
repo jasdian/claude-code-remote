@@ -6,6 +6,7 @@ use crate::domain::{ClaudeSessionId, ThreadId};
 use crate::error::AppError;
 use dashmap::DashMap;
 use smallvec::SmallVec;
+use tokio::sync::oneshot;
 use tokio::time::Instant;
 
 use super::process::ClaudeProcessHandle;
@@ -20,6 +21,8 @@ struct ActiveSession {
 pub struct SessionManager {
     active: DashMap<ThreadId, ActiveSession>,
     pending: DashMap<ThreadId, Vec<String>>,
+    /// Oneshot channels for routing user replies to waiting control_requests.
+    reply_waiters: DashMap<ThreadId, oneshot::Sender<String>>,
     config: Arc<AppConfig>,
 }
 
@@ -28,6 +31,7 @@ impl SessionManager {
         Self {
             active: DashMap::with_capacity(config.claude.max_sessions),
             pending: DashMap::new(),
+            reply_waiters: DashMap::new(),
             config,
         }
     }
@@ -98,6 +102,21 @@ impl SessionManager {
             .remove(&thread_id)
             .map(|(_, msgs)| msgs)
             .filter(|msgs| !msgs.is_empty())
+    }
+
+    /// Store a oneshot sender to route the next user reply to a waiting control_request.
+    pub fn set_reply_waiter(&self, thread_id: ThreadId, tx: oneshot::Sender<String>) {
+        self.reply_waiters.insert(thread_id, tx);
+    }
+
+    /// Take the reply waiter for a thread (if any). Returns None if no one is waiting.
+    pub fn take_reply_waiter(&self, thread_id: ThreadId) -> Option<oneshot::Sender<String>> {
+        self.reply_waiters.remove(&thread_id).map(|(_, tx)| tx)
+    }
+
+    /// Check if a thread has a pending reply waiter.
+    pub fn has_reply_waiter(&self, thread_id: ThreadId) -> bool {
+        self.reply_waiters.contains_key(&thread_id)
     }
 
     /// Interrupt: signal the active process to stop without removing it.

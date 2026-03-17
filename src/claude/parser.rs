@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::domain::{ClaudeEvent, ClaudeSessionId};
+use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData};
 
 /// HOT PATH: called for every line of Claude stdout.
 ///
@@ -19,6 +19,7 @@ pub fn parse_stream_line(line: &str) -> Option<ClaudeEvent> {
         "system" => parse_system(&v),
         "assistant" => parse_assistant(&v),
         "result" => parse_result(&v),
+        "control_request" => parse_control_request(&v),
         // content_block_delta / content_block_start for API-style streaming (future)
         "content_block_delta" => parse_content_delta(&v),
         "content_block_start" => parse_block_start(&v),
@@ -67,9 +68,11 @@ fn parse_assistant(v: &serde_json::Value) -> Option<ClaudeEvent> {
                 }
                 if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
                     let preview = extract_tool_preview(name, block);
+                    let input_json = extract_input_json(block);
                     events.push(ClaudeEvent::ToolUse {
                         tool: Arc::from(name),
                         input_preview: Arc::from(preview.as_str()),
+                        input_json: Arc::from(input_json.as_str()),
                     });
                 }
             }
@@ -82,9 +85,11 @@ fn parse_assistant(v: &serde_json::Value) -> Option<ClaudeEvent> {
                     .get("is_error")
                     .and_then(|e| e.as_bool())
                     .unwrap_or(false);
+                let output_preview = extract_result_preview(block);
                 events.push(ClaudeEvent::ToolResult {
                     tool: Arc::from(tool),
                     is_error,
+                    output_preview: Arc::from(output_preview.as_str()),
                 });
             }
             _ => {}
@@ -155,12 +160,129 @@ fn parse_block_start(v: &serde_json::Value) -> Option<ClaudeEvent> {
         "tool_use" => {
             let tool = block.get("name")?.as_str()?;
             let preview = extract_tool_preview(tool, v);
+            let input_json = extract_input_json(v);
             Some(ClaudeEvent::ToolUse {
                 tool: Arc::from(tool),
                 input_preview: Arc::from(preview.as_str()),
+                input_json: Arc::from(input_json.as_str()),
             })
         }
         _ => None,
+    }
+}
+
+/// Parse a `control_request` event (permission prompt or AskUserQuestion).
+#[inline]
+fn parse_control_request(v: &serde_json::Value) -> Option<ClaudeEvent> {
+    let request_id = v.get("request_id")?.as_str()?;
+    let request = v.get("request")?;
+    let tool_name = request
+        .get("tool_name")
+        .and_then(|t| t.as_str())
+        .unwrap_or("unknown");
+
+    let question = extract_control_question(tool_name, request);
+    let input_json = request
+        .get("input")
+        .map(|i| i.to_string())
+        .unwrap_or_default();
+
+    Some(ClaudeEvent::ControlRequest(Box::new(ControlRequestData {
+        request_id: Arc::from(request_id),
+        tool_name: Arc::from(tool_name),
+        question: Arc::from(question.as_str()),
+        input_json: Arc::from(input_json.as_str()),
+    })))
+}
+
+/// Extract human-readable question text from a control_request.
+#[inline]
+fn extract_control_question(tool_name: &str, request: &serde_json::Value) -> String {
+    let input = request.get("input");
+
+    if tool_name == "AskUserQuestion" {
+        // Try input.question (simple form)
+        if let Some(q) = input
+            .and_then(|i| i.get("question"))
+            .and_then(|q| q.as_str())
+        {
+            return q.to_string();
+        }
+        // Try input.questions[0].question (array form)
+        if let Some(q) = input
+            .and_then(|i| i.get("questions"))
+            .and_then(|qs| qs.as_array())
+            .and_then(|qs| qs.first())
+            .and_then(|q| q.get("question"))
+            .and_then(|q| q.as_str())
+        {
+            return q.to_string();
+        }
+    }
+
+    // Fallback: use title or description from the request
+    request
+        .get("title")
+        .and_then(|t| t.as_str())
+        .or_else(|| request.get("description").and_then(|d| d.as_str()))
+        .map(String::from)
+        .unwrap_or_else(|| format!("{tool_name} requires approval"))
+}
+
+/// Serialize the full `input` field of a tool_use block to JSON string.
+#[inline]
+fn extract_input_json(block: &serde_json::Value) -> String {
+    block
+        .get("input")
+        .map(|i| i.to_string())
+        .unwrap_or_default()
+}
+
+/// Extract a short preview from a tool_result block's content.
+#[inline]
+fn extract_result_preview(block: &serde_json::Value) -> String {
+    // tool_result content can be a string or array of content blocks
+    if let Some(content) = block.get("content") {
+        if let Some(s) = content.as_str() {
+            return truncate_preview(s, 200);
+        }
+        if let Some(arr) = content.as_array() {
+            // P2: single-pass fold, no intermediate Vec
+            let text = arr
+                .iter()
+                .filter_map(|b| {
+                    (b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .then(|| b.get("text").and_then(|t| t.as_str()))
+                        .flatten()
+                })
+                .fold(String::new(), |mut acc, s| {
+                    if !acc.is_empty() {
+                        acc.push('\n');
+                    }
+                    acc.push_str(s);
+                    acc
+                });
+            if !text.is_empty() {
+                return truncate_preview(&text, 200);
+            }
+        }
+    }
+    // Fallback: try output field
+    block
+        .get("output")
+        .and_then(|o| o.as_str())
+        .map(|s| truncate_preview(s, 200))
+        .unwrap_or_default()
+}
+
+/// Truncate a string at a word/char boundary for preview display.
+#[inline]
+fn truncate_preview(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let end = s.floor_char_boundary(max - 3);
+        format!("{}...", &s[..end])
     }
 }
 
@@ -174,10 +296,7 @@ fn extract_tool_preview(tool: &str, block: &serde_json::Value) -> String {
     };
 
     let preview = match tool {
-        "Bash" => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
+        "Bash" => input.get("command").and_then(|v| v.as_str()).unwrap_or(""),
         "Read" => input
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -190,14 +309,8 @@ fn extract_tool_preview(tool: &str, block: &serde_json::Value) -> String {
             .get("file_path")
             .and_then(|v| v.as_str())
             .unwrap_or(""),
-        "Grep" => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
-        "Glob" => input
-            .get("pattern")
-            .and_then(|v| v.as_str())
-            .unwrap_or(""),
+        "Grep" => input.get("pattern").and_then(|v| v.as_str()).unwrap_or(""),
+        "Glob" => input.get("pattern").and_then(|v| v.as_str()).unwrap_or(""),
         "Agent" => input
             .get("description")
             .and_then(|v| v.as_str())

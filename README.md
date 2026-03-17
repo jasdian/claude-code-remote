@@ -47,21 +47,24 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - **DM mode** — message the bot directly, no slash commands needed
 - **Server mode** — thread-per-session with `/claude` slash command
 - **@mention support** — mention the bot in a session thread to continue the conversation
-- Slash commands: `/claude`, `/end`, `/interrupt`, `/sessions`
+- Slash commands: `/claude`, `/end`, `/interrupt`, `/sessions`, `/compact`, `/context`, `/audit`
 - **Message queuing** — messages sent while Claude is busy are queued (📨) and auto-processed
 - **Interrupt** — `!` prefix or `/interrupt` kills current task and sends the new message (⏭️)
 - Natural follow-ups — just type in the thread to continue
 - Smart message chunking (handles Discord's 2000-char limit)
 - Typing indicators and tool-use status (tool usage audited to SQLite)
+- **Interactive prompts** — `AskUserQuestion` and permission requests are shown in Discord with @mention; reply to answer, auto-denied after 120s timeout
 - `/end` archives the thread after stopping the session
 
 **Claude Code Management**
-- Subprocess lifecycle via `tokio::process`
+- Subprocess lifecycle via `tokio::process` with bidirectional stdin/stdout (`--input-format stream-json`)
 - Streaming `stream-json` parser for real-time output
+- `control_request` handling — interactive permission prompts and user questions routed through Discord
 - Multi-turn conversations via `--resume SESSION_ID`
 - Smart project resolution — named projects, sibling directory discovery, or default cwd
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
+- **Full tool audit trail** — every tool invocation logged to SQLite with full input JSON, result preview, error status, and duration
 - Session timeout and automatic cleanup
 - stderr capture — Claude process errors are logged and surfaced to Discord
 
@@ -191,9 +194,10 @@ format = "pretty"                                    # pretty or json
 
 ### Tool Permissions
 
-The `allowed_tools` list controls which tools Claude can use. In headless (`-p`) mode:
+The `allowed_tools` list controls which tools Claude can use:
 - **Listed tools are auto-approved** — no permission prompt needed
-- **Unlisted tools are denied** — Claude cannot use them (fail-closed)
+- **Unlisted tools trigger a permission prompt** — the bot displays the request in Discord with an @mention, and the user can reply to approve or deny
+- **Permission timeout** — if no reply within 120 seconds, the request is auto-denied
 - Set `dangerously_skip_permissions = true` to bypass all permission checks (use only in trusted environments)
 
 ## Commands
@@ -221,11 +225,11 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | `/approve <user>` | Anywhere | Admin: approve a pending request (ephemeral) |
 | `/revoke <user>` | Anywhere | Admin: revoke a user's access (ephemeral) |
 | `/pending` | Anywhere | Admin: list pending requests (ephemeral) |
-| `/audit [id] [count]` | Session thread | Admin: view tool usage audit log (ephemeral) |
+| `/audit [id] [count] [detail]` | Session thread | Admin: view tool usage audit log; `detail=true` shows full input JSON and result (ephemeral) |
 
 After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
 
-If Claude is busy, your message is **queued** (📨 reaction) and sent automatically when the current task finishes. Prefix with `!` to **interrupt** (⏭️ reaction) — kills the current task and sends your message immediately.
+If Claude is busy, your message is **queued** (📨 reaction) and sent automatically when the current task finishes. Prefix with `!` to **interrupt** (⏭️ reaction) — kills the current task and sends your message immediately. If Claude is waiting for your reply to a question or permission prompt, your message is routed as the answer (💬 reaction).
 
 ### Access Control
 
@@ -340,18 +344,22 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 | Bot responds but Claude output is empty | Check stderr logs — Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
 | Follow-up messages start new conversations | Check logs for `claude_session_id` — the session may have expired |
-| Ctrl+C doesn't work | Run the binary directly (`./target/debug/claude-remote-chat`), not via `cargo run` |
+| Ctrl+C doesn't work | Fixed in v0.2.0: Claude subprocesses now run in their own process group, so SIGINT only reaches the bot which handles graceful shutdown |
 | "Invalid Form Body (name)" error | Thread name exceeded 100 chars — this is now fixed with proper truncation |
 
 ## Roadmap
 
 Potential future features:
 
-- **Interactive permission prompts** — Use `--permission-prompt-tool` to route Claude's permission requests to Discord, letting users approve/deny tool use from their phone via reaction buttons
 - **Session list with details** — Enhance `/sessions` to show thread links, project names, and session age
-- **Multi-user session sharing** — Allow other authorized users to interact with a session in the same thread
-- **File attachment support** — Send files via Discord attachments for Claude to read
+- **Multi-user session sharing** — Allow other authorized users to interact with a session in the same thread; adjust audit (new table?), to handle user requests and their messages
+- **File attachment support** — Send files/images via Discord attachments for Claude to read
 - **Git worktree per session** — Isolate concurrent sessions working on the same project
+- **Reaction-based permission approval** — Use Discord reaction buttons instead of text replies for permission prompts
+- **Thread aware follow-up warnings** - regarding issue `Follow-up messages start new conversations` - backend follows with additional message, asks user about new conversation (backend waits for user answer, timeout)
+- **Extend `tool-uses` audit log** - add missing information, like `duration_ms`, `result_preview` and others.
+- **`/health` endpoint** - to enable monitoring status of the service. Simple `Axum` or `Hyper` crate usage.
+- **Claude code binary** - change container & the way Claude is installed. Get inspired by the `shell.nix`. Claude is now installed as a standalone binary app.
 
 ## Related Projects
 

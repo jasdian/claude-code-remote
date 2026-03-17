@@ -2,14 +2,20 @@ use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
+use smallvec::SmallVec;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::domain::{ClaudeEvent, SessionStatus, ThreadId};
 use crate::AppState;
+use crate::domain::{ClaudeEvent, SessionStatus, ThreadId};
 
 const BUFFER_INITIAL_CAPACITY: usize = 2048;
 const FLUSH_THRESHOLD: usize = 1800;
+/// Inline tool timer entry — typically 1-2 concurrent tool calls.
+type ToolTimers = SmallVec<[(i64, Instant); 4]>;
+/// Inline audit ID tracker — maps tool name Arc to audit row ID.
+type AuditIds = SmallVec<[(Arc<str>, i64); 4]>;
 
 pub async fn stream_to_discord(
     http: Arc<serenity::Http>,
@@ -51,7 +57,10 @@ pub async fn stream_to_discord(
         let pending = state.session_manager.take_pending(thread_id);
 
         if !sent_any && pending.is_none() {
-            tracing::warn!(?thread_id, "stream finished with no content sent to discord");
+            tracing::warn!(
+                ?thread_id,
+                "stream finished with no content sent to discord"
+            );
             send_message(&http, channel_id, "_Claude produced no response._").await;
         }
 
@@ -60,10 +69,19 @@ pub async fn stream_to_discord(
         };
 
         let combined = messages.join("\n\n");
-        tracing::info!(?thread_id, count = messages.len(), "processing queued messages");
+        tracing::info!(
+            ?thread_id,
+            count = messages.len(),
+            "processing queued messages"
+        );
 
         // Notify the user that a queued message is being picked up
-        send_message(&http, channel_id, &format!("📨 _Queued ({} msg)_", messages.len())).await;
+        send_message(
+            &http,
+            channel_id,
+            &format!("📨 _Queued ({} msg)_", messages.len()),
+        )
+        .await;
 
         // Get session info for resume
         let session = crate::db::get_session_by_thread(&state.db, thread_id).await;
@@ -76,7 +94,6 @@ pub async fn stream_to_discord(
         let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
         let cwd_result = config.resolve_cwd(Some(&session.project)).await;
         let Ok(cwd_str) = cwd_result else {
-            // Fallback: try to get cwd from session manager
             tracing::error!(?thread_id, "could not resolve cwd for pending messages");
             break;
         };
@@ -99,7 +116,12 @@ pub async fn stream_to_discord(
 
         let Ok(handle) = handle else {
             tracing::error!(?thread_id, "failed to spawn claude for queued messages");
-            send_message(&http, channel_id, "**Error:** failed to start Claude for queued message.").await;
+            send_message(
+                &http,
+                channel_id,
+                "**Error:** failed to start Claude for queued message.",
+            )
+            .await;
             break;
         };
 
@@ -135,6 +157,9 @@ async fn stream_events(
     let mut buffer = String::with_capacity(BUFFER_INITIAL_CAPACITY);
     let mut in_code_fence = false;
     let mut sent_any = false;
+    // P3: SmallVec for typically-small collections (1-2 concurrent tool calls)
+    let mut tool_timers: ToolTimers = SmallVec::new();
+    let mut latest_audit_id: AuditIds = SmallVec::new();
 
     loop {
         tokio::select! {
@@ -155,17 +180,23 @@ async fn stream_events(
                             send_message(http, channel_id, &chunk).await;
                         }
                     }
-                    Some(ClaudeEvent::ToolUse { tool, input_preview }) => {
+                    Some(ClaudeEvent::ToolUse { tool, input_preview, input_json }) => {
                         if !buffer.is_empty() {
                             let chunk = take_all(&mut buffer);
                             send_message(http, channel_id, &chunk).await;
                             in_code_fence = false;
                         }
-                        // Log to audit table (best-effort)
+                        // Log to audit table with full JSON (best-effort)
                         let msg = match crate::db::log_tool_use(
-                            &state.db, thread_id, &tool, &input_preview,
+                            &state.db, thread_id, &tool, &input_preview, &input_json,
                         ).await {
-                            Ok(id) => format!("_Using {} ..._ `#{id}`", &*tool),
+                            Ok(id) => {
+                                tool_timers.push((id, Instant::now()));
+                                // Remove previous entry for same tool, then push new
+                                latest_audit_id.retain(|(t, _)| t != &tool);
+                                latest_audit_id.push((Arc::clone(&tool), id));
+                                format!("_Using {} ..._ `#{id}`", &*tool)
+                            }
                             Err(e) => {
                                 tracing::warn!(?thread_id, tool = &*tool, error = %e, "failed to log tool use");
                                 format!("_Using {} ..._", &*tool)
@@ -173,10 +204,49 @@ async fn stream_events(
                         };
                         send_message(http, channel_id, &msg).await;
                     }
-                    Some(ClaudeEvent::ToolResult { tool, is_error }) => {
+                    Some(ClaudeEvent::ToolResult { tool, is_error, output_preview }) => {
                         let status = if is_error { "failed" } else { "done" };
+                        // Update audit record with result (best-effort)
+                        // P2: find + retain for linear scan on small collection
+                        if let Some(pos) = latest_audit_id.iter().position(|(t, _)| t == &tool) {
+                            let (_, audit_id) = latest_audit_id.remove(pos);
+                            let duration_ms = tool_timers
+                                .iter()
+                                .position(|(id, _)| *id == audit_id)
+                                .map(|i| tool_timers.remove(i).1.elapsed().as_millis() as i64);
+                            let _ = crate::db::update_tool_result(
+                                &state.db, audit_id, is_error, &output_preview, duration_ms,
+                            ).await;
+                        }
                         send_message(http, channel_id,
                             &format!("_{} {status}_", &*tool)).await;
+                    }
+                    Some(ClaudeEvent::ControlRequest(cr)) => {
+                        if !buffer.is_empty() {
+                            let chunk = take_all(&mut buffer);
+                            send_message(http, channel_id, &chunk).await;
+                            in_code_fence = false;
+                        }
+                        // Log to audit (best-effort)
+                        let _ = crate::db::log_tool_use(
+                            &state.db, thread_id, &cr.tool_name, &cr.question, &cr.input_json,
+                        ).await;
+
+                        // Look up thread owner for mention (best-effort)
+                        let mention = crate::db::get_session_by_thread(&state.db, thread_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|s| format!("<@{}>", s.user_id.get()))
+                            .unwrap_or_default();
+
+                        // Display question with @mention to notify the thread owner
+                        let display = if &*cr.tool_name == "AskUserQuestion" {
+                            format!("{mention} **Claude asks:** {}", &*cr.question)
+                        } else {
+                            format!("{mention} **Permission required ({}):** {}", &*cr.tool_name, &*cr.question)
+                        };
+                        send_message(http, channel_id, &display).await;
                     }
                     Some(ClaudeEvent::SessionId(sid)) => {
                         state.session_manager.set_session_id(thread_id, sid.clone());
@@ -228,6 +298,7 @@ fn take_chunk(buffer: &mut String, in_code_fence: bool) -> String {
         split_at
     };
 
+    // P3: drain prefix in-place, avoid intermediate String allocation
     let remainder = buffer[remainder_start..].to_string();
     buffer.clear();
     if in_code_fence {

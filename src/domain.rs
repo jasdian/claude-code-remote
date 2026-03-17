@@ -115,6 +115,17 @@ impl AsRef<str> for SessionStatus {
     }
 }
 
+/// P3: Boxed payload for ControlRequest — keeps ClaudeEvent enum compact.
+#[derive(Debug, Clone)]
+pub struct ControlRequestData {
+    pub request_id: Arc<str>,
+    pub tool_name: Arc<str>,
+    /// Human-readable question or tool description for display.
+    pub question: Arc<str>,
+    /// Full input JSON for audit logging.
+    pub input_json: Arc<str>,
+}
+
 // ClaudeEvent: compact enum (P3)
 
 #[derive(Debug, Clone)]
@@ -123,11 +134,16 @@ pub enum ClaudeEvent {
     ToolUse {
         tool: Arc<str>,
         input_preview: Arc<str>,
+        input_json: Arc<str>,
     },
     ToolResult {
         tool: Arc<str>,
         is_error: bool,
+        output_preview: Arc<str>,
     },
+    /// Claude CLI `control_request` — permission prompt or AskUserQuestion.
+    /// P3: Boxed to keep enum size compact (ControlRequest is rare vs TextDelta).
+    ControlRequest(Box<ControlRequestData>),
     SessionId(ClaudeSessionId),
     Done,
     Error(Box<str>),
