@@ -191,20 +191,27 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 
 ## Commands
 
+#### Session
+
 | Command | Where | Description |
 |---------|-------|-------------|
-| `/claude <prompt> [project]` | Server | Start a new Claude session in a thread |
-| `/end` | Session thread | Stop session and archive the thread |
+| `/claude <prompt> [project]` | Server | Start a new session in a thread |
+| *(just type)* | DM | Start or continue a session |
+| *@mention bot* | Session thread | Continue the conversation |
 | `/interrupt [prompt]` | Session thread | Kill current task, optionally send new prompt |
+| `!message` | Session thread | Interrupt current task and send message |
+| `/end` | Session thread | Stop session and archive the thread |
 | `/sessions` | Anywhere | Show active session count |
+
+#### Access
+
+| Command | Where | Description |
+|---------|-------|-------------|
 | `/optin` | Anywhere | Request access (ephemeral) |
 | `/optout` | Anywhere | Remove your own access (ephemeral) |
 | `/approve <user>` | Anywhere | Admin: approve a pending request (ephemeral) |
 | `/revoke <user>` | Anywhere | Admin: revoke a user's access (ephemeral) |
-| `/pending` | Anywhere | Admin: list pending access requests (ephemeral) |
-| *(just type)* | DM | Start or continue a Claude session |
-| *@mention bot* | Session thread | Continue the conversation |
-| `!message` | Session thread | Interrupt current task and send message |
+| `/pending` | Anywhere | Admin: list pending requests (ephemeral) |
 
 After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
 
