@@ -9,7 +9,8 @@ services:
       - db-data:/data
       - claude-state:/home/appuser/.claude
       - ./config.prod.toml:/app/config.toml:ro
-      - /home/you/projects:/projects
+      # All cwd paths in config.prod.toml must be under /projects
+      - ${PROJECTS_PATH:-/home/you/projects}:/projects
     logging:
       driver: json-file
       options:

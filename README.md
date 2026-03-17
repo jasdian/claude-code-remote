@@ -257,9 +257,20 @@ The image uses `node:22-slim` as the base (Node.js is required for the Claude CL
 
 ```bash
 cp config.example.toml config.prod.toml
-# Edit config.prod.toml:
-#   database.url = "sqlite:/data/data.db?mode=rwc"
-#   claude.default_cwd = "/projects"
+```
+
+All `cwd` paths in the config must point inside the `/projects` mount so Claude can read/write project files. The host directory is bind-mounted read-write.
+
+```toml
+# config.prod.toml — Docker paths
+[database]
+url = "sqlite:/data/data.db?mode=rwc"
+
+[claude]
+default_cwd = "/projects"
+
+[claude.projects.myapp]
+cwd = "/projects/myapp"
 ```
 
 ### 4. Run
@@ -279,7 +290,7 @@ docker run -d \
   -v claude-data:/data \
   -v claude-state:/home/appuser/.claude \
   -v ./config.prod.toml:/app/config.toml:ro \
-  -v /home/you/projects:/projects \
+  -v /path/to/your/projects:/projects \
   claude-remote-chat
 ```
 
