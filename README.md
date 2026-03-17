@@ -234,6 +234,62 @@ cargo clippy --all-targets     # Lint
 cargo build --release          # Release build (LTO, stripped)
 ```
 
+## Docker Deployment
+
+The bot can be containerized using the pre-built static binary pattern.
+
+### 1. Build the Binary
+
+```bash
+cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/claude-remote-chat .
+```
+
+### 2. Build the Image
+
+```bash
+docker build -t claude-remote-chat .
+```
+
+The image uses `node:22-slim` as the base (Node.js is required for the Claude CLI) and installs `@anthropic-ai/claude-code` globally.
+
+### 3. Configure
+
+```bash
+cp config.example.toml config.prod.toml
+# Edit config.prod.toml:
+#   database.url = "sqlite:/data/data.db?mode=rwc"
+#   claude.default_cwd = "/projects"
+```
+
+### 4. Run
+
+```bash
+# Set your API key
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# With compose
+docker compose up -d
+
+# Or standalone
+docker run -d \
+  --name claude-remote-chat \
+  --restart unless-stopped \
+  -e ANTHROPIC_API_KEY \
+  -v claude-data:/data \
+  -v ./config.prod.toml:/app/config.toml:ro \
+  -v /home/you/projects:/projects \
+  claude-remote-chat
+```
+
+### Volumes
+
+| Mount | Purpose |
+|-------|---------|
+| `/data` | SQLite database (named volume) |
+| `/app/config.toml` | Configuration file (bind mount, read-only) |
+| `/projects` | Project directories Claude works on (bind mount) |
+
 ## Tech Stack
 
 - **Rust** with Tokio async runtime + tokio-util (CancellationToken)

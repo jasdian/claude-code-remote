@@ -265,22 +265,27 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
 }
 
 #[poise::command(slash_command)]
-pub async fn audit(ctx: Context<'_>) -> Result<(), AppError> {
+pub async fn audit(
+    ctx: Context<'_>,
+    #[description = "Tool use ID (omit for latest)"] id: Option<i64>,
+    #[description = "Number of entries to show"] count: Option<i64>,
+) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
     check_admin(&ctx)?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
-    let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id).await?;
+    let n = count.unwrap_or(1).max(1);
+    let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id, id, n).await?;
     if rows.is_empty() {
-        ctx.say("No tool uses recorded for this thread.").await?;
+        ctx.say("No tool uses found.").await?;
     } else {
-        let mut out = String::from("**Tool audit:**\n");
-        for (id, tool, preview, ts) in &rows {
+        let mut out = String::new();
+        for (row_id, tool, preview, ts) in &rows {
             let preview_str = if preview.is_empty() {
                 String::new()
             } else {
                 format!(" — `{preview}`")
             };
-            out.push_str(&format!("`#{id}` **{tool}**{preview_str} ({ts})\n"));
+            out.push_str(&format!("`#{row_id}` **{tool}**{preview_str} ({ts})\n"));
         }
         // Chunk if over Discord limit
         if out.len() > 2000 {

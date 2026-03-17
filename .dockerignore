@@ -1,0 +1,10 @@
+target/
+.git/
+.claude/
+config.toml
+data.db*
+shell.nix
+*.md
+src/
+Cargo.lock
+Cargo.toml

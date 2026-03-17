@@ -229,16 +229,37 @@ pub async fn log_tool_use(
 pub async fn get_tool_uses(
     pool: &SqlitePool,
     thread_id: ThreadId,
+    at_id: Option<i64>,
+    count: i64,
 ) -> Result<Vec<(i64, String, String, String)>, AppError> {
     let tid = thread_id.get() as i64;
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT id, tool, input_preview, created_at FROM tool_uses
-         WHERE thread_id = ? ORDER BY id",
-    )
-    .bind(tid)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows)
+    let rows: Vec<(i64, String, String, String)> = match at_id {
+        Some(id) => {
+            // N rows ending at (and including) the given ID
+            sqlx::query_as(
+                "SELECT id, tool, input_preview, created_at FROM tool_uses
+                 WHERE thread_id = ? AND id <= ? ORDER BY id DESC LIMIT ?",
+            )
+            .bind(tid)
+            .bind(id)
+            .bind(count)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            // Latest N rows
+            sqlx::query_as(
+                "SELECT id, tool, input_preview, created_at FROM tool_uses
+                 WHERE thread_id = ? ORDER BY id DESC LIMIT ?",
+            )
+            .bind(tid)
+            .bind(count)
+            .fetch_all(pool)
+            .await?
+        }
+    };
+    // Results come DESC, reverse to chronological order
+    Ok(rows.into_iter().rev().collect())
 }
 
 // --- Access requests ---

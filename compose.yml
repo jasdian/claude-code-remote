@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    container_name: claude-remote-chat
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    volumes:
+      - db-data:/data
+      - ./config.prod.toml:/app/config.toml:ro
+      - /home/you/projects:/projects
+    logging:
+      driver: json-file
+      options:
+        max-size: "4m"
+        max-file: "10"
+
+volumes:
+  db-data:
