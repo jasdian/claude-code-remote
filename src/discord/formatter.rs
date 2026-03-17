@@ -67,20 +67,34 @@ pub async fn stream_to_discord(
             break;
         };
 
-        let combined = messages.join("\n\n");
-        tracing::info!(
-            ?thread_id,
-            count = messages.len(),
-            "processing queued messages"
-        );
+        let msg_count = messages.len();
+        // Check if multiple users contributed to decide on username prefix
+        let multi_user = messages.iter().any(|m| m.user_id != messages[0].user_id);
+        let combined = if multi_user {
+            messages
+                .iter()
+                .map(|m| format!("[{}]: {}", m.username, m.content))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            messages
+                .iter()
+                .map(|m| m.content.as_ref())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        };
+        // Update current user to the last message's author for tool attribution
+        if let Some(last) = messages.last() {
+            state.session_manager.set_current_user(
+                thread_id,
+                last.user_id,
+                Arc::clone(&last.username),
+            );
+        }
+        tracing::info!(?thread_id, count = msg_count, "processing queued messages");
 
         // Notify the user that a queued message is being picked up
-        send_message(
-            &http,
-            channel_id,
-            &format!("📨 _Queued ({} msg)_", messages.len()),
-        )
-        .await;
+        send_message(&http, channel_id, &format!("📨 _Queued ({msg_count} msg)_")).await;
 
         // Get session info for resume
         let session = crate::db::get_session_by_thread(&state.db, thread_id).await;
@@ -191,8 +205,9 @@ async fn stream_events(
                             in_code_fence = false;
                         }
                         // Log to audit table with full JSON (best-effort)
+                        let current_user = state.session_manager.get_current_user(thread_id);
                         let msg = match crate::db::log_tool_use(
-                            &state.db, thread_id, &tool, &input_preview, &input_json,
+                            &state.db, thread_id, current_user, &tool, &input_preview, &input_json,
                         ).await {
                             Ok(id) => {
                                 tool_timers.push((id, Instant::now()));
@@ -231,18 +246,27 @@ async fn stream_events(
                             send_message(http, channel_id, &chunk).await;
                             in_code_fence = false;
                         }
-                        // Log to audit (best-effort)
-                        let _ = crate::db::log_tool_use(
-                            &state.db, thread_id, &cr.tool_name, &cr.question, &cr.input_json,
-                        ).await;
+                        // Log to audit and track for result update (best-effort)
+                        let current_user = state.session_manager.get_current_user(thread_id);
+                        if let Ok(id) = crate::db::log_tool_use(
+                            &state.db, thread_id, current_user, &cr.tool_name, &cr.question, &cr.input_json,
+                        ).await {
+                            tool_timers.push((id, Instant::now()));
+                            latest_audit_id.retain(|(t, _)| t != &cr.tool_name);
+                            latest_audit_id.push((Arc::clone(&cr.tool_name), id));
+                        }
 
-                        // Look up thread owner for mention (best-effort)
-                        let mention = crate::db::get_session_by_thread(&state.db, thread_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|s| format!("<@{}>", s.user_id.get()))
-                            .unwrap_or_default();
+                        // Mention the user who triggered this tool call, falling back to owner
+                        let mention = if let Some(uid) = current_user {
+                            format!("<@{}>", uid.get())
+                        } else {
+                            crate::db::get_session_by_thread(&state.db, thread_id)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|s| format!("<@{}>", s.owner_id.get()))
+                                .unwrap_or_default()
+                        };
 
                         // Display question with @mention to notify the thread owner
                         let display = if &*cr.tool_name == "AskUserQuestion" {
@@ -273,6 +297,19 @@ async fn stream_events(
     if !buffer.is_empty() {
         let chunk = take_all(&mut buffer);
         send_message(http, channel_id, &chunk).await;
+    }
+
+    // Finalize any unresolved audit entries (e.g. auto-denied control_requests)
+    for (audit_id, start) in tool_timers.drain(..) {
+        let duration_ms = start.elapsed().as_millis() as i64;
+        let _ = crate::db::update_tool_result(
+            &state.db,
+            audit_id,
+            false,
+            "(no result — auto-denied or stream ended)",
+            Some(duration_ms),
+        )
+        .await;
     }
 
     sent_any

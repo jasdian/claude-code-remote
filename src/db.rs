@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use smallvec::SmallVec;
 use sqlx::sqlite::SqliteRow;
 use sqlx::{FromRow, Row, SqlitePool};
 use uuid::Uuid;
@@ -10,7 +11,7 @@ use crate::error::AppError;
 struct SessionRow {
     id: String,
     thread_id: i64,
-    user_id: i64,
+    owner_id: i64,
     claude_session_id: Option<String>,
     project: String,
     status: String,
@@ -24,7 +25,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
         Ok(Self {
             id: row.try_get("id")?,
             thread_id: row.try_get("thread_id")?,
-            user_id: row.try_get("user_id")?,
+            owner_id: row.try_get("owner_id")?,
             claude_session_id: row.try_get("claude_session_id")?,
             project: row.try_get("project")?,
             status: row.try_get("status")?,
@@ -38,40 +39,76 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 /// ISO 8601 UTC timestamp expression for SQLite.
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-async fn current_version(pool: &SqlitePool) -> Result<i32, AppError> {
+/// Schema version.
+const SCHEMA_VERSION: i32 = 1;
+
+pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i32 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(pool)
         .await?;
-    Ok(version)
-}
 
-pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
-    let version = current_version(pool).await?;
-
-    if version < 1 {
-        // v0 -> v1: full schema
+    if version < SCHEMA_VERSION {
         sqlx::query(&format!(
             "CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 thread_id INTEGER NOT NULL UNIQUE,
-                user_id INTEGER NOT NULL,
+                owner_id INTEGER NOT NULL,
                 claude_session_id TEXT,
                 project TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
-                last_active_at TEXT NOT NULL DEFAULT ({NOW_UTC})
+                last_active_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                worktree_path TEXT
             )"
         ))
         .execute(pool)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id)")
-            .execute(pool)
-            .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS session_participants (
+                session_thread_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'participant',
+                joined_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                PRIMARY KEY (session_thread_id, user_id),
+                FOREIGN KEY (session_thread_id) REFERENCES sessions(thread_id) ON DELETE CASCADE
+            )"
+        ))
+        .execute(pool)
+        .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
-            .execute(pool)
-            .await?;
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                FOREIGN KEY (thread_id) REFERENCES sessions(thread_id) ON DELETE CASCADE
+            )"
+        ))
+        .execute(pool)
+        .await?;
+
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS tool_uses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                user_id INTEGER,
+                tool TEXT NOT NULL,
+                input_preview TEXT NOT NULL DEFAULT '',
+                input_json TEXT NOT NULL DEFAULT '',
+                is_error INTEGER NOT NULL DEFAULT 0,
+                result_preview TEXT NOT NULL DEFAULT '',
+                duration_ms INTEGER,
+                created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                FOREIGN KEY (thread_id) REFERENCES sessions(thread_id) ON DELETE CASCADE
+            )"
+        ))
+        .execute(pool)
+        .await?;
 
         sqlx::query(&format!(
             "CREATE TABLE IF NOT EXISTS access_requests (
@@ -84,69 +121,60 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await?;
 
-        sqlx::query(&format!(
-            "CREATE TABLE IF NOT EXISTS tool_uses (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                thread_id INTEGER NOT NULL,
-                tool TEXT NOT NULL,
-                input_preview TEXT NOT NULL DEFAULT '',
-                created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
-                FOREIGN KEY (thread_id) REFERENCES sessions(thread_id)
-            )"
-        ))
-        .execute(pool)
-        .await?;
-
+        // Indexes
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
+            .execute(pool)
+            .await?;
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_tool_uses_thread ON tool_uses(thread_id)")
             .execute(pool)
             .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_tool_uses_user ON tool_uses(user_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_user ON messages(user_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_participants_thread ON session_participants(session_thread_id)",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_participants_user ON session_participants(user_id)",
+        )
+        .execute(pool)
+        .await?;
 
-        sqlx::query("PRAGMA user_version = 1").execute(pool).await?;
-        tracing::info!("migration: v0 -> v1 (sessions, access_requests, tool_uses)");
-    }
-
-    if version < 2 {
-        // v1 -> v2: full audit blob storage + result tracking
-        sqlx::query("ALTER TABLE tool_uses ADD COLUMN input_json TEXT NOT NULL DEFAULT ''")
+        sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)
             .await?;
-        sqlx::query("ALTER TABLE tool_uses ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0")
-            .execute(pool)
-            .await?;
-        sqlx::query("ALTER TABLE tool_uses ADD COLUMN result_preview TEXT NOT NULL DEFAULT ''")
-            .execute(pool)
-            .await?;
-        sqlx::query("ALTER TABLE tool_uses ADD COLUMN duration_ms INTEGER")
-            .execute(pool)
-            .await?;
-
-        sqlx::query("PRAGMA user_version = 2").execute(pool).await?;
-        tracing::info!("migration: v1 -> v2 (tool_uses audit columns)");
-    }
-
-    if version < 3 {
-        sqlx::query("ALTER TABLE sessions ADD COLUMN worktree_path TEXT")
-            .execute(pool)
-            .await?;
-        sqlx::query("PRAGMA user_version = 3").execute(pool).await?;
-        tracing::info!("migration: v2 -> v3 (worktree_path column)");
+        tracing::info!("migration: v{version} -> v{SCHEMA_VERSION}");
     }
 
     Ok(())
 }
 
+// --- Session CRUD ---
+
 pub async fn create_session(
     pool: &SqlitePool,
     thread_id: ThreadId,
-    user_id: UserId,
+    owner_id: UserId,
     project: &str,
     worktree_path: Option<&str>,
+    owner_username: &str,
 ) -> Result<(), AppError> {
     let id = Uuid::new_v4().to_string();
     let tid = thread_id.get() as i64;
-    let uid = user_id.get() as i64;
+    let uid = owner_id.get() as i64;
     sqlx::query(
-        "INSERT INTO sessions (id, thread_id, user_id, project, status, worktree_path)
+        "INSERT INTO sessions (id, thread_id, owner_id, project, status, worktree_path)
          VALUES (?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
@@ -157,6 +185,18 @@ pub async fn create_session(
     .bind(worktree_path)
     .execute(pool)
     .await?;
+
+    // Auto-add owner as participant
+    sqlx::query(
+        "INSERT OR IGNORE INTO session_participants (session_thread_id, user_id, username, role)
+         VALUES (?, ?, ?, 'owner')",
+    )
+    .bind(tid)
+    .bind(uid)
+    .bind(owner_username)
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
 
@@ -166,7 +206,7 @@ pub async fn get_session_by_thread(
 ) -> Result<Option<Session>, AppError> {
     let tid = thread_id.get() as i64;
     let row: Option<SessionRow> = sqlx::query_as(
-        "SELECT id, thread_id, user_id, claude_session_id, project, status,
+        "SELECT id, thread_id, owner_id, claude_session_id, project, status,
                 created_at, last_active_at, worktree_path
          FROM sessions WHERE thread_id = ? AND status IN (?, ?)",
     )
@@ -176,17 +216,53 @@ pub async fn get_session_by_thread(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|r| Session {
+    Ok(row.map(session_from_row))
+}
+
+/// Find any session for a thread, regardless of status (including stopped/expired).
+pub async fn get_any_session_by_thread(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<Option<Session>, AppError> {
+    let tid = thread_id.get() as i64;
+    let row: Option<SessionRow> = sqlx::query_as(
+        "SELECT id, thread_id, owner_id, claude_session_id, project, status,
+                created_at, last_active_at, worktree_path
+         FROM sessions WHERE thread_id = ?",
+    )
+    .bind(tid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(session_from_row))
+}
+
+/// Delete session row by thread_id (to allow creating a fresh one on the same thread).
+pub async fn delete_session_by_thread(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query("DELETE FROM sessions WHERE thread_id = ?")
+        .bind(tid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+#[inline]
+fn session_from_row(r: SessionRow) -> Session {
+    Session {
         id: Uuid::parse_str(&r.id).unwrap_or_default(),
         thread_id: ThreadId::new(r.thread_id as u64),
-        user_id: UserId::new(r.user_id as u64),
+        owner_id: UserId::new(r.owner_id as u64),
         status: SessionStatus::from(r.status.as_str()),
         last_active_at: r.last_active_at.parse().unwrap_or_default(),
         claude_session_id: r.claude_session_id.map(|s| ClaudeSessionId::new(&s)),
         project: Arc::from(r.project.as_str()),
         created_at: r.created_at.parse().unwrap_or_default(),
         worktree_path: r.worktree_path.map(|s| Arc::from(s.as_str())),
-    }))
+    }
 }
 
 pub async fn update_session_id(
@@ -236,21 +312,137 @@ pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(),
     Ok(())
 }
 
+// --- Session participants ---
+
+pub async fn add_participant(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    user_id: UserId,
+    username: &str,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    let uid = user_id.get() as i64;
+    sqlx::query(
+        "INSERT OR IGNORE INTO session_participants (session_thread_id, user_id, username, role)
+         VALUES (?, ?, ?, 'participant')",
+    )
+    .bind(tid)
+    .bind(uid)
+    .bind(username)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn is_participant(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    user_id: UserId,
+) -> Result<bool, AppError> {
+    let tid = thread_id.get() as i64;
+    let uid = user_id.get() as i64;
+    let found: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM session_participants
+         WHERE session_thread_id = ? AND user_id = ?",
+    )
+    .bind(tid)
+    .bind(uid)
+    .fetch_one(pool)
+    .await?;
+    Ok(found)
+}
+
+pub struct ParticipantRow {
+    pub user_id: u64,
+    pub username: String,
+    pub role: String,
+    pub joined_at: String,
+}
+
+pub async fn get_participants(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<SmallVec<[ParticipantRow; 4]>, AppError> {
+    let tid = thread_id.get() as i64;
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT user_id, username, role, joined_at
+         FROM session_participants WHERE session_thread_id = ?
+         ORDER BY joined_at",
+    )
+    .bind(tid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(uid, username, role, joined_at)| ParticipantRow {
+            user_id: uid as u64,
+            username,
+            role,
+            joined_at,
+        })
+        .collect())
+}
+
+pub async fn remove_participant(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    user_id: UserId,
+) -> Result<bool, AppError> {
+    let tid = thread_id.get() as i64;
+    let uid = user_id.get() as i64;
+    let result = sqlx::query(
+        "DELETE FROM session_participants
+         WHERE session_thread_id = ? AND user_id = ? AND role != 'owner'",
+    )
+    .bind(tid)
+    .bind(uid)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+// --- Messages ---
+
+pub async fn log_message(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    user_id: UserId,
+    username: &str,
+    content: &str,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    let uid = user_id.get() as i64;
+    sqlx::query(
+        "INSERT INTO messages (thread_id, user_id, username, content)
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(tid)
+    .bind(uid)
+    .bind(username)
+    .bind(content)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Tool audit ---
 
 pub async fn log_tool_use(
     pool: &SqlitePool,
     thread_id: ThreadId,
+    user_id: Option<UserId>,
     tool: &str,
     input_preview: &str,
     input_json: &str,
 ) -> Result<i64, AppError> {
     let tid = thread_id.get() as i64;
+    let uid = user_id.map(|u| u.get() as i64);
     let id: i64 = sqlx::query_scalar(
-        "INSERT INTO tool_uses (thread_id, tool, input_preview, input_json)
-         VALUES (?, ?, ?, ?) RETURNING id",
+        "INSERT INTO tool_uses (thread_id, user_id, tool, input_preview, input_json)
+         VALUES (?, ?, ?, ?, ?) RETURNING id",
     )
     .bind(tid)
+    .bind(uid)
     .bind(tool)
     .bind(input_preview)
     .bind(input_json)

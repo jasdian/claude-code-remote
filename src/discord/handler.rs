@@ -4,19 +4,34 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::AppState;
-use crate::domain::{ThreadId, UserId};
+use crate::domain::{SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
+
+/// Timeout for "start new session?" confirmation (seconds).
+const CONFIRM_TIMEOUT_SECS: u64 = 60;
 
 /// Check if a channel is a DM
 fn is_dm(msg: &serenity::Message) -> bool {
     msg.guild_id.is_none()
 }
 
-/// Check if user is authorized (config or DB-approved)
-async fn is_authorized(state: &AppState, user_id: u64) -> bool {
+/// Check if user is authorized (config, roles, or DB-approved)
+async fn is_authorized(state: &AppState, msg: &serenity::Message) -> bool {
+    let user_id = msg.author.id.get();
     let auth = &state.config.auth;
     if auth.allowed_users.contains(&user_id) || auth.admins.contains(&user_id) {
         return true;
+    }
+    // Check guild roles (msg.member is present for guild messages)
+    if let Some(ref member) = msg.member {
+        let has_role = member.roles.iter().any(|role| {
+            auth.allowed_roles
+                .iter()
+                .any(|&allowed| allowed == role.get())
+        });
+        if has_role {
+            return true;
+        }
     }
     crate::db::is_user_approved(&state.db, user_id)
         .await
@@ -68,9 +83,26 @@ pub async fn handle_message(
 
     // Check for existing session (thread follow-up or DM continuation)
     if let Some(session) = crate::db::get_session_by_thread(&state.db, thread_id).await? {
-        if session.user_id != user_id {
-            return Ok(());
+        // Multi-user: allow owner and participants; auto-join authorized users
+        let is_owner = session.owner_id == user_id;
+        if !is_owner {
+            if !is_authorized(state, msg).await {
+                return Ok(());
+            }
+            // Auto-join: authorized user in session thread becomes participant
+            if !crate::db::is_participant(&state.db, thread_id, user_id).await? {
+                crate::db::add_participant(&state.db, thread_id, user_id, &msg.author.name).await?;
+                tracing::info!(
+                    ?thread_id,
+                    user = msg.author.name,
+                    "user auto-joined session"
+                );
+            }
         }
+
+        // Log message for audit trail
+        let _ =
+            crate::db::log_message(&state.db, thread_id, user_id, &msg.author.name, &prompt).await;
 
         if state.session_manager.has_session(thread_id) {
             // Check if there's a pending reply waiter (AskUserQuestion / permission)
@@ -88,16 +120,26 @@ pub async fn handle_message(
             if is_interrupt {
                 tracing::info!(?thread_id, "interrupting session");
                 // Queue BEFORE interrupt to avoid race with stream_to_discord
-                state
-                    .session_manager
-                    .queue_message(thread_id, clean_prompt.to_string());
+                state.session_manager.queue_message(
+                    thread_id,
+                    UserMessage {
+                        user_id,
+                        username: Arc::from(msg.author.name.as_str()),
+                        content: Arc::from(clean_prompt),
+                    },
+                );
                 state.session_manager.interrupt(thread_id);
                 msg.react(ctx, serenity::ReactionType::Unicode("⏭️".into()))
                     .await?;
             } else {
-                state
-                    .session_manager
-                    .queue_message(thread_id, prompt.to_string());
+                state.session_manager.queue_message(
+                    thread_id,
+                    UserMessage {
+                        user_id,
+                        username: Arc::from(msg.author.name.as_str()),
+                        content: Arc::from(prompt.as_ref()),
+                    },
+                );
                 msg.react(ctx, serenity::ReactionType::Unicode("📨".into()))
                     .await?;
                 tracing::info!(?thread_id, "message queued");
@@ -112,6 +154,12 @@ pub async fn handle_message(
             project = %session.project,
             "resuming session",
         );
+        // Track current user for tool attribution
+        state.session_manager.set_current_user(
+            thread_id,
+            user_id,
+            Arc::from(msg.author.name.as_str()),
+        );
         return start_claude(
             ctx,
             msg,
@@ -125,17 +173,115 @@ pub async fn handle_message(
         .await;
     }
 
+    // Check for pending "start new session?" confirmation (user-scoped)
+    if let Some(original_prompt) = state.session_manager.take_confirm_new(thread_id, user_id) {
+        if is_affirmative(&prompt) {
+            tracing::info!(?thread_id, "user confirmed new session in thread");
+            return start_new_in_thread(ctx, msg, state, thread_id, user_id, &original_prompt)
+                .await;
+        }
+        // Not affirmative — discard confirmation, ignore message
+        tracing::debug!(?thread_id, "user declined new session");
+        msg.react(ctx, serenity::ReactionType::Unicode("👌".into()))
+            .await?;
+        return Ok(());
+    }
+
     // No existing session — if this is a DM, auto-create one
-    if is_dm(msg) && is_authorized(state, msg.author.id.get()).await {
+    if is_dm(msg) && is_authorized(state, msg).await {
         tracing::info!(user = msg.author.name, "new DM session");
 
         let cwd = state.config.claude.resolve_cwd(None).await?;
         let project_name = crate::project_name_from_cwd(std::path::Path::new(cwd.as_ref()));
-        crate::db::create_session(&state.db, thread_id, user_id, project_name, None).await?;
+        crate::db::create_session(
+            &state.db,
+            thread_id,
+            user_id,
+            project_name,
+            None,
+            &msg.author.name,
+        )
+        .await?;
+        // Track current user for tool attribution
+        state.session_manager.set_current_user(
+            thread_id,
+            user_id,
+            Arc::from(msg.author.name.as_str()),
+        );
         return start_claude(ctx, msg, state, thread_id, &prompt, None, None, None).await;
     }
 
+    // Thread follow-up with no active/idle session — check if an expired/stopped session exists
+    if !is_dm(msg)
+        && is_authorized(state, msg).await
+        && let Some(old) = crate::db::get_any_session_by_thread(&state.db, thread_id).await?
+        && old.owner_id == user_id
+        && matches!(old.status, SessionStatus::Stopped | SessionStatus::Expired)
+    {
+        let status_label = old.status.as_str();
+        let mention = format!("<@{}>", user_id.get());
+        let warning = format!(
+            "{mention} Previous session is **{status_label}**. \
+             Reply **yes** within {CONFIRM_TIMEOUT_SECS}s to start a new conversation, \
+             or use `/claude` to start fresh in a new thread."
+        );
+        msg.channel_id.say(ctx, &warning).await?;
+
+        // Store original prompt and schedule timeout cleanup (user-scoped)
+        state
+            .session_manager
+            .set_confirm_new(thread_id, user_id, prompt.to_string());
+
+        let state_ref = Arc::clone(state);
+        let tid = thread_id;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(CONFIRM_TIMEOUT_SECS)).await;
+            state_ref.session_manager.remove_confirm_new(tid);
+            tracing::debug!(?tid, "new-session confirmation timed out");
+        });
+
+        return Ok(());
+    }
+
     Ok(())
+}
+
+/// Check if the user's reply is an affirmative ("yes", "y", "yeah", etc.)
+#[inline]
+fn is_affirmative(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "yes" | "y" | "yeah" | "yep" | "yup" | "sure" | "ok" | "okay"
+    )
+}
+
+/// Delete old session row and start a fresh session in the same thread.
+async fn start_new_in_thread(
+    ctx: &serenity::Context,
+    msg: &serenity::Message,
+    state: &Arc<AppState>,
+    thread_id: ThreadId,
+    user_id: UserId,
+    prompt: &str,
+) -> Result<(), AppError> {
+    crate::db::delete_session_by_thread(&state.db, thread_id).await?;
+
+    let cwd = state.config.claude.resolve_cwd(None).await?;
+    let project_name = crate::project_name_from_cwd(std::path::Path::new(cwd.as_ref()));
+    crate::db::create_session(
+        &state.db,
+        thread_id,
+        user_id,
+        project_name,
+        None,
+        &msg.author.name,
+    )
+    .await?;
+    // Track current user for tool attribution
+    state
+        .session_manager
+        .set_current_user(thread_id, user_id, Arc::from(msg.author.name.as_str()));
+    start_claude(ctx, msg, state, thread_id, prompt, None, None, None).await
 }
 
 /// Check if message is an interrupt request. `!` prefix interrupts current and sends the rest.
@@ -187,4 +333,23 @@ async fn start_claude(
     ));
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn affirmative_replies() {
+        for word in ["yes", "y", "Yeah", "YEP", "sure", "OK", "okay", "  Yes  "] {
+            assert!(is_affirmative(word), "{word:?} should be affirmative");
+        }
+    }
+
+    #[test]
+    fn non_affirmative_replies() {
+        for word in ["no", "nope", "fix the bug", "", "yesterday", "yesbutno"] {
+            assert!(!is_affirmative(word), "{word:?} should not be affirmative");
+        }
+    }
 }

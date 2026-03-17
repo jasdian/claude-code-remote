@@ -4,7 +4,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::Context;
-use crate::domain::{SessionStatus, ThreadId, UserId};
+use crate::domain::{SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 
 #[inline]
@@ -92,7 +92,21 @@ pub async fn claude(
     // DB write first — borrows worktree_path; register() moves it after.
     let user_id = UserId::from(ctx.author().id);
     let wt_str = worktree_path.as_ref().and_then(|p| p.to_str());
-    crate::db::create_session(&state.db, thread_id, user_id, project_name, wt_str).await?;
+    crate::db::create_session(
+        &state.db,
+        thread_id,
+        user_id,
+        project_name,
+        wt_str,
+        &ctx.author().name,
+    )
+    .await?;
+    // Track current user for tool attribution
+    state.session_manager.set_current_user(
+        thread_id,
+        user_id,
+        Arc::from(ctx.author().name.as_str()),
+    );
 
     state
         .session_manager
@@ -115,9 +129,25 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
     check_auth(&ctx).await?;
     let thread_id = ThreadId::from(ctx.channel_id());
+    let user_id = UserId::from(ctx.author().id);
 
     // Look up session for worktree cleanup before changing status
     let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+
+    // Only owner or admin can end a session
+    if let Some(ref s) = session {
+        let is_admin = ctx
+            .data()
+            .config
+            .auth
+            .admins
+            .contains(&ctx.author().id.get());
+        if s.owner_id != user_id && !is_admin {
+            ctx.say("Only the session owner or an admin can end it.")
+                .await?;
+            return Ok(());
+        }
+    }
 
     let had_session = if let Some((handle, wt_path)) = ctx.data().session_manager.remove(thread_id)
     {
@@ -170,7 +200,14 @@ pub async fn interrupt(
     }
 
     if let Some(msg) = prompt {
-        ctx.data().session_manager.queue_message(thread_id, msg);
+        ctx.data().session_manager.queue_message(
+            thread_id,
+            UserMessage {
+                user_id: UserId::from(ctx.author().id),
+                username: Arc::from(ctx.author().name.as_str()),
+                content: Arc::from(msg.as_str()),
+            },
+        );
     }
 
     ctx.data().session_manager.interrupt(thread_id);
@@ -298,9 +335,14 @@ async fn send_session_command(
 
     // If busy, queue the command
     if state.session_manager.has_session(thread_id) {
-        state
-            .session_manager
-            .queue_message(thread_id, cli_cmd.to_string());
+        state.session_manager.queue_message(
+            thread_id,
+            UserMessage {
+                user_id: UserId::from(ctx.author().id),
+                username: Arc::from(ctx.author().name.as_str()),
+                content: Arc::from(cli_cmd),
+            },
+        );
         ctx.say(queue_msg).await?;
         return Ok(());
     }
@@ -446,6 +488,127 @@ async fn audit_detail(ctx: &Context<'_>, id: i64) -> Result<(), AppError> {
     }
 
     send_ephemeral_chunked(ctx, &out).await?;
+    Ok(())
+}
+
+// --- Multi-user session commands ---
+
+#[poise::command(slash_command)]
+pub async fn participants(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_auth(&ctx).await?;
+    let thread_id = ThreadId::from(ctx.channel_id());
+
+    let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+    if session.is_none() {
+        ctx.say("No active session in this thread.").await?;
+        return Ok(());
+    }
+
+    let parts = crate::db::get_participants(&ctx.data().db, thread_id).await?;
+    if parts.is_empty() {
+        ctx.say("No participants found.").await?;
+    } else {
+        let list = parts
+            .iter()
+            .map(|p| {
+                let badge = if p.role == "owner" { " (owner)" } else { "" };
+                format!("• **{}** (<@{}>){badge}", p.username, p.user_id)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.say(format!("**Participants:**\n{list}")).await?;
+    }
+    Ok(())
+}
+
+/// Remove a participant from the current session.
+#[poise::command(slash_command, rename = "sessionkick")]
+pub async fn sessionkick(
+    ctx: Context<'_>,
+    #[description = "User to remove from session"] user: serenity::User,
+) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_auth(&ctx).await?;
+    let thread_id = ThreadId::from(ctx.channel_id());
+    let caller_id = UserId::from(ctx.author().id);
+
+    let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+    let Some(session) = session else {
+        ctx.say("No active session in this thread.").await?;
+        return Ok(());
+    };
+
+    // Only owner or admin can kick
+    let is_admin = ctx
+        .data()
+        .config
+        .auth
+        .admins
+        .contains(&ctx.author().id.get());
+    if session.owner_id != caller_id && !is_admin {
+        ctx.say("Only the session owner or an admin can kick participants.")
+            .await?;
+        return Ok(());
+    }
+
+    let target_id = UserId::from(user.id);
+    if target_id == session.owner_id {
+        ctx.say("Cannot kick the session owner.").await?;
+        return Ok(());
+    }
+
+    if crate::db::remove_participant(&ctx.data().db, thread_id, target_id).await? {
+        ctx.say(format!("Removed **{}** from the session.", user.name))
+            .await?;
+    } else {
+        ctx.say(format!("**{}** is not a participant.", user.name))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Ban a user from session and revoke their dynamic access.
+#[poise::command(slash_command, rename = "sessionban")]
+pub async fn sessionban(
+    ctx: Context<'_>,
+    #[description = "User to ban from session and revoke access"] user: serenity::User,
+) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_admin(&ctx)?;
+    let thread_id = ThreadId::from(ctx.channel_id());
+
+    let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+
+    let target_id = UserId::from(user.id);
+
+    // Remove from session if one exists
+    let mut actions: Vec<&str> = Vec::new();
+    if let Some(ref session) = session {
+        if target_id == session.owner_id {
+            ctx.say("Cannot ban the session owner.").await?;
+            return Ok(());
+        }
+        if crate::db::remove_participant(&ctx.data().db, thread_id, target_id).await? {
+            actions.push("removed from session");
+        }
+    }
+
+    // Revoke dynamic access (DB-approved via /optin)
+    if crate::db::revoke_access(&ctx.data().db, user.id.get()).await? {
+        actions.push("access revoked");
+    }
+
+    if actions.is_empty() {
+        ctx.say(format!(
+            "**{}** is not a participant and has no dynamic access.",
+            user.name
+        ))
+        .await?;
+    } else {
+        ctx.say(format!("**{}**: {}.", user.name, actions.join(", ")))
+            .await?;
+    }
     Ok(())
 }
 

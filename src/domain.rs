@@ -65,7 +65,7 @@ impl From<serenity::UserId> for UserId {
 pub struct Session {
     pub id: Uuid,
     pub thread_id: ThreadId,
-    pub user_id: UserId,
+    pub owner_id: UserId,
     // Hot path fields first (P5: locality)
     pub status: SessionStatus,
     pub last_active_at: DateTime<Utc>,
@@ -74,6 +74,16 @@ pub struct Session {
     pub project: Arc<str>,
     pub created_at: DateTime<Utc>,
     pub worktree_path: Option<Arc<str>>,
+}
+
+// Multi-user support types
+
+/// User-attributed message for pending queue (replaces bare String).
+#[derive(Debug, Clone)]
+pub struct UserMessage {
+    pub user_id: UserId,
+    pub username: Arc<str>,
+    pub content: Arc<str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

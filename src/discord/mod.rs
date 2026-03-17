@@ -28,6 +28,9 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
                 commands::compact(),
                 commands::context(),
                 commands::audit(),
+                commands::participants(),
+                commands::sessionkick(),
+                commands::sessionban(),
             ],
             event_handler: |ctx, event, _fw_ctx, state| {
                 Box::pin(async move {

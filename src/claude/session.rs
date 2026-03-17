@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::AppConfig;
-use crate::domain::{ClaudeSessionId, ThreadId};
+use crate::domain::{ClaudeSessionId, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 use dashmap::DashMap;
 use smallvec::SmallVec;
@@ -21,9 +21,13 @@ struct ActiveSession {
 
 pub struct SessionManager {
     active: DashMap<ThreadId, ActiveSession>,
-    pending: DashMap<ThreadId, Vec<String>>,
+    pending: DashMap<ThreadId, Vec<UserMessage>>,
     /// Oneshot channels for routing user replies to waiting control_requests.
     reply_waiters: DashMap<ThreadId, oneshot::Sender<String>>,
+    /// Original prompts awaiting "start new session?" confirmation, scoped to the requesting user.
+    confirm_new: DashMap<ThreadId, (UserId, String)>,
+    /// Tracks which user triggered the current Claude run (for tool audit attribution).
+    current_user: DashMap<ThreadId, (UserId, Arc<str>)>,
     config: Arc<AppConfig>,
 }
 
@@ -33,6 +37,8 @@ impl SessionManager {
             active: DashMap::with_capacity(config.claude.max_sessions),
             pending: DashMap::new(),
             reply_waiters: DashMap::new(),
+            confirm_new: DashMap::new(),
+            current_user: DashMap::new(),
             config,
         }
     }
@@ -97,12 +103,12 @@ impl SessionManager {
     }
 
     /// Queue a follow-up message for a busy session.
-    pub fn queue_message(&self, thread_id: ThreadId, message: String) {
+    pub fn queue_message(&self, thread_id: ThreadId, message: UserMessage) {
         self.pending.entry(thread_id).or_default().push(message);
     }
 
     /// Take all pending messages for a session.
-    pub fn take_pending(&self, thread_id: ThreadId) -> Option<Vec<String>> {
+    pub fn take_pending(&self, thread_id: ThreadId) -> Option<Vec<UserMessage>> {
         self.pending
             .remove(&thread_id)
             .map(|(_, msgs)| msgs)
@@ -122,6 +128,42 @@ impl SessionManager {
     /// Check if a thread has a pending reply waiter.
     pub fn has_reply_waiter(&self, thread_id: ThreadId) -> bool {
         self.reply_waiters.contains_key(&thread_id)
+    }
+
+    /// Store an original prompt awaiting "new session?" confirmation, scoped to user.
+    pub fn set_confirm_new(&self, thread_id: ThreadId, user_id: UserId, prompt: String) {
+        self.confirm_new.insert(thread_id, (user_id, prompt));
+    }
+
+    /// Take the stored prompt if the confirming user matches the original requester.
+    pub fn take_confirm_new(&self, thread_id: ThreadId, user_id: UserId) -> Option<String> {
+        // Only let the same user who initiated the confirmation consume it
+        if let Some(entry) = self.confirm_new.get(&thread_id)
+            && entry.0 == user_id
+        {
+            return self.confirm_new.remove(&thread_id).map(|(_, (_, p))| p);
+        }
+        None
+    }
+
+    /// Remove a stale confirmation (timeout cleanup).
+    pub fn remove_confirm_new(&self, thread_id: ThreadId) {
+        self.confirm_new.remove(&thread_id);
+    }
+
+    /// Set which user triggered the current Claude run (for tool audit attribution).
+    pub fn set_current_user(&self, thread_id: ThreadId, user_id: UserId, username: Arc<str>) {
+        self.current_user.insert(thread_id, (user_id, username));
+    }
+
+    /// Get the current user for a thread.
+    pub fn get_current_user(&self, thread_id: ThreadId) -> Option<UserId> {
+        self.current_user.get(&thread_id).map(|e| e.0)
+    }
+
+    /// Clear current user tracking for a thread.
+    pub fn clear_current_user(&self, thread_id: ThreadId) {
+        self.current_user.remove(&thread_id);
     }
 
     /// Interrupt: signal the active process to stop without removing it.

@@ -2,9 +2,9 @@
 
 # claude-remote-chat
 
-**Talk to Claude Code from your phone. Rust Discord bot that bridges mobile to running Claude Code terminal sessions.**
+**Collaborate with Claude Code as a team -- one Discord thread, multiple minds.**
 
-*Your AI pair-programmer, always in your pocket.*
+*Your team's AI pair programmer, one Discord thread away.*
 
 <p align="center">
 <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" alt="Rust"></a>
@@ -16,63 +16,72 @@
 
 ## Why?
 
-Long-running Claude Code sessions stall at permission prompts, need follow-up input, or produce results you want to check — but you're not at your desk. Existing solutions are mostly TypeScript. This one is Rust.
+Your team uses Claude Code, but each person runs their own session in their own terminal. **Nobody sees what Claude is doing for someone else.** Context gets lost, work gets duplicated, and junior devs are left out of the loop.
+
+claude-remote-chat turns Claude Code into a **shared, real-time experience**. One person starts a session in Discord. Teammates jump in -- ask follow-up questions, steer Claude in a new direction, review its tool usage -- all in the same thread. Everyone sees the same streaming output, and every message is attributed to the person who sent it.
+
+**Concrete scenario:** A backend engineer starts a Claude session to refactor the auth module. The security lead joins the thread to add constraints. A new hire watches the whole exchange and learns the codebase. The audit trail records who asked for what. The session runs on your machine with full file access -- nothing leaves your infrastructure.
 
 ```
-You (phone / Discord DM or server)
-       |
-       v
-claude-remote-chat (Rust)
-       |
-       v
-  Claude Code CLI
-       |
-       v
-  Your Machine
+Alice (laptop)  --+
+                  |    Discord Thread     claude-remote-chat (Rust)     Claude Code CLI
+Bob   (phone)   --+--> #refactor-auth --> session manager          --> claude -p
+Carol (tablet)  --+                       (per-user attribution)       (your machine)
 ```
+
+It also works great for **solo use** -- talk to Claude Code from your phone while away from your desk, check on long-running sessions, and approve tool permissions from anywhere.
 
 ## How It Works
 
-1. You DM the bot or use `/claude fix the auth bug` in a server
+1. Alice uses `/claude refactor the auth module` in a server channel
 2. Bot spawns `claude -p` as a subprocess on your machine
-3. Claude Code runs locally with full file access
-4. Response flows back to Discord in real-time
-5. You reply — the bot resumes the same Claude session via `--resume`
+3. A Discord thread is created; Claude's response streams in real-time
+4. Bob opens the thread and types a follow-up -- he's **auto-joined** as a participant
+5. Carol uses `/join` to participate; `/participants` shows everyone in the session
+6. Every message is attributed: Claude knows who said what
+7. Alice (the owner) can `/kick` someone or `/end` the session
 
 Works in both **DMs** (just message the bot directly) and **server channels** (creates a thread per session).
 
 ## Features
 
+**Multi-User Collaboration**
+- **Auto-join** -- authorized users typing in a session thread are automatically added as participants
+- **Participant management** -- `/participants`, `/sessionkick`, `/sessionban` commands for session membership
+- **Per-user message attribution** -- every message to Claude is tagged with the sender's identity
+- **Owner/participant roles** -- session creator has owner privileges; controls who can `/end` or `/sessionkick`
+- **Full audit trail** -- tool invocations logged to SQLite with user attribution, input JSON, result preview, error status, and duration
+- **Admin override** -- server admins can manage any session regardless of ownership
+
 **Discord Integration**
-- **DM mode** — message the bot directly, no slash commands needed
-- **Server mode** — thread-per-session with `/claude` slash command
-- **@mention support** — mention the bot in a session thread to continue the conversation
-- Slash commands: `/claude`, `/end`, `/interrupt`, `/sessions`, `/compact`, `/context`, `/audit`
-- **Message queuing** — messages sent while Claude is busy are queued (📨) and auto-processed
-- **Interrupt** — `!` prefix or `/interrupt` kills current task and sends the new message (⏭️)
-- Natural follow-ups — just type in the thread to continue
+- **DM mode** -- message the bot directly, no slash commands needed
+- **Server mode** -- thread-per-session with `/claude` slash command
+- **@mention support** -- mention the bot in a session thread to continue the conversation
+- **Message queuing** -- messages sent while Claude is busy are queued and auto-processed
+- **Interrupt** -- `!` prefix or `/interrupt` kills current task and sends the new message
+- Natural follow-ups -- just type in the thread to continue
 - Smart message chunking (handles Discord's 2000-char limit)
-- Typing indicators and tool-use status (tool usage audited to SQLite)
-- **Interactive prompts** — `AskUserQuestion` and permission requests are shown in Discord with @mention; reply to answer, auto-denied after 120s timeout
+- Typing indicators and tool-use status
+- **Interactive prompts** -- `AskUserQuestion` and permission requests are shown in Discord with @mention; reply to answer, auto-denied after 120s timeout
+- **Expired session warnings** -- messages in ended/expired threads prompt confirmation before starting a new session (60s timeout)
 - `/end` archives the thread after stopping the session
 
 **Claude Code Management**
 - Subprocess lifecycle via `tokio::process` with `--output-format stream-json`
 - Streaming `stream-json` parser for real-time output
-- `control_request` handling — interactive permission prompts and user questions routed through Discord
+- `control_request` handling -- interactive permission prompts and user questions routed through Discord
 - Multi-turn conversations via `--resume SESSION_ID`
-- Smart project resolution — named projects, sibling directory discovery, or default cwd
+- Smart project resolution -- named projects, sibling directory discovery, or default cwd
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
-- **Full tool audit trail** — every tool invocation logged to SQLite with full input JSON, result preview, error status, and duration
-- **Git worktree isolation** — optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
+- **Git worktree isolation** -- optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
 - Session timeout and automatic cleanup
-- stderr capture — Claude process errors are logged and surfaced to Discord
+- stderr capture -- Claude process errors are logged and surfaced to Discord
 
 **Security**
 - Discord user/role allowlist
 - Per-project tool restrictions (`--allowedTools` auto-approves listed tools, denies others)
-- No secrets in Discord — Claude runs locally on your machine
+- No secrets in Discord -- Claude runs locally on your machine
 
 **Operations**
 - SQLite session persistence (survives bot restarts)
@@ -83,31 +92,31 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 ## Prerequisites
 
 **Native:**
-- **Rust** (stable, latest) — or use `nix-shell` for the dev environment
-- **Claude Code CLI** (`claude`) — installed and authenticated on your machine
+- **Rust** (stable, latest) -- or use `nix-shell` for the dev environment
+- **Claude Code CLI** (`claude`) -- installed and authenticated on your machine
 
 **Docker:**
 - **Docker** with Compose (Rust and Claude CLI are bundled in the image)
 
 **Both:**
-- **Discord Bot** — created via the Developer Portal (see setup below)
-- **Anthropic API key** — for the Claude CLI
+- **Discord Bot** -- created via the Developer Portal (see setup below)
+- **Anthropic API key** -- for the Claude CLI
 
 ## Discord Bot Setup
 
 ### 1. Create the Application
 
 1. Go to **https://discord.com/developers/applications**
-2. Click **"New Application"** — give it a name (e.g. "Claude Remote")
+2. Click **"New Application"** -- give it a name (e.g. "Claude Remote")
 3. Note the **Application ID** on the General Information page
 
 ### 2. Create the Bot
 
 1. Click **"Bot"** in the left sidebar
 2. Click **"Reset Token"** to generate a bot token
-3. **Copy the token** — you'll need it for `config.toml`. This is the only time you can see it.
+3. **Copy the token** -- you'll need it for `config.toml`. This is the only time you can see it.
 4. Under **Privileged Gateway Intents**, enable:
-   - **Message Content Intent** (required — the bot reads message text)
+   - **Message Content Intent** (required -- the bot reads message text)
 5. Save changes
 
 ### 3. Get Your IDs
@@ -154,11 +163,13 @@ cargo run
 
 ### 6. Use It
 
-**Via DM**: Just open a DM with the bot and type your message. No slash commands needed — every message starts or continues a Claude session.
+**Via DM**: Just open a DM with the bot and type your message. No slash commands needed -- every message starts or continues a Claude session.
 
 **Via Server**: Use `/claude <prompt>` in any channel. The bot creates a thread and streams Claude's response. Reply in the thread to continue.
 
 **Via @mention**: In an existing session thread, @mention the bot with your message to continue the conversation.
+
+**Collaborate**: Any authorized user who types in an active session thread is automatically joined as a participant. Use `/participants` to see who's in a session.
 
 ## Configuration
 
@@ -198,9 +209,9 @@ format = "pretty"                                    # pretty or json
 ### Tool Permissions
 
 The `allowed_tools` list controls which tools Claude can use:
-- **Listed tools are auto-approved** — no permission prompt needed
-- **Unlisted tools trigger a permission prompt** — the bot displays the request in Discord with an @mention, and the user can reply to approve or deny
-- **Permission timeout** — if no reply within 120 seconds, the request is auto-denied
+- **Listed tools are auto-approved** -- no permission prompt needed
+- **Unlisted tools trigger a permission prompt** -- the bot displays the request in Discord with an @mention, and the user can reply to approve or deny
+- **Permission timeout** -- if no reply within 120 seconds, the request is auto-denied
 - Set `dangerously_skip_permissions = true` to bypass all permission checks (use only in trusted environments)
 
 ## Commands
@@ -216,8 +227,16 @@ The `allowed_tools` list controls which tools Claude can use:
 | `!message` | Session thread | Interrupt current task and send message |
 | `/compact` | Session thread | Summarize conversation to reduce context usage |
 | `/context` | Session thread | Show current context window and token usage |
-| `/end` | Session thread | Stop session and archive the thread |
+| `/end` | Session thread | Stop session and archive the thread (owner/admin only) |
 | `/sessions` | Anywhere | Show active session count |
+
+#### Collaboration
+
+| Command | Where | Description |
+|---------|-------|-------------|
+| `/participants` | Session thread | List all participants and their roles (ephemeral) |
+| `/sessionkick <user>` | Session thread | Remove a participant (owner/admin only, ephemeral) |
+| `/sessionban <user>` | Session thread | Remove from session and revoke access (admin only, ephemeral) |
 
 #### Access
 
@@ -230,16 +249,16 @@ The `allowed_tools` list controls which tools Claude can use:
 | `/pending` | Anywhere | Admin: list pending requests (ephemeral) |
 | `/audit [id] [count] [detail]` | Session thread | Admin: view tool usage audit log; `detail=true` shows full input JSON and result (ephemeral) |
 
-After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
+After the initial `/claude` command in a server, just type messages in the thread -- the bot picks them up automatically.
 
-If Claude is busy, your message is **queued** (📨 reaction) and sent automatically when the current task finishes. Prefix with `!` to **interrupt** (⏭️ reaction) — kills the current task and sends your message immediately. If Claude is waiting for your reply to a question or permission prompt, your message is routed as the answer (💬 reaction).
+If Claude is busy, your message is **queued** and sent automatically when the current task finishes. Prefix with `!` to **interrupt** -- kills the current task and sends your message immediately. If Claude is waiting for your reply to a question or permission prompt, your message is routed as the answer.
 
 ### Access Control
 
 Users can be authorized in three ways:
-1. **Config** — `allowed_users` and `admins` in `config.toml` (permanent, requires restart)
-2. **Roles** — `allowed_roles` in config (Discord role-based)
-3. **Dynamic** — `/optin` request approved by an admin via `/approve` (stored in DB, instant)
+1. **Config** -- `allowed_users` and `admins` in `config.toml` (permanent, requires restart)
+2. **Roles** -- `allowed_roles` in config (Discord role-based)
+3. **Dynamic** -- `/optin` request approved by an admin via `/approve` (stored in DB, instant)
 
 ## Build Commands
 
@@ -268,7 +287,7 @@ cp target/x86_64-unknown-linux-musl/release/claude-remote-chat .
 docker build -t claude-remote-chat .
 ```
 
-The image uses `node:22-slim` as the base (Node.js is required for the Claude CLI) and installs `@anthropic-ai/claude-code` globally.
+The image uses `debian:bookworm-slim` as the base and installs Claude Code as a standalone binary (no Node.js required).
 
 ### 3. Configure
 
@@ -279,7 +298,7 @@ cp config.example.toml config.prod.toml
 All `cwd` paths in the config must point inside the `/projects` mount so Claude can read/write project files. The host directory is bind-mounted read-write.
 
 ```toml
-# config.prod.toml — Docker paths
+# config.prod.toml -- Docker paths
 [database]
 url = "sqlite:/data/data.db?mode=rwc"
 
@@ -323,13 +342,13 @@ docker run -d \
 ## Tech Stack
 
 - **Rust** with Tokio async runtime + tokio-util (CancellationToken)
-- **poise** — Discord bot framework (wraps serenity)
-- **sqlx** — SQLite for session persistence
-- **dashmap** — Lock-free concurrent session registry
-- **smallvec** — Inline stack storage for small collections
-- **tokio::process** — Claude Code subprocess management
-- **tracing** — Structured logging
-- **serde + toml** — Two-phase config (Raw TOML -> validated Arc<str>-backed)
+- **poise** -- Discord bot framework (wraps serenity)
+- **sqlx** -- SQLite for session persistence
+- **dashmap** -- Lock-free concurrent session registry
+- **smallvec** -- Inline stack storage for small collections
+- **tokio::process** -- Claude Code subprocess management
+- **tracing** -- Structured logging
+- **serde + toml** -- Two-phase config (Raw TOML -> validated Arc<str>-backed)
 
 ## Architecture
 
@@ -344,30 +363,27 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 | Slash commands don't appear | Wait 1-2 minutes after first bot startup for Discord to register them globally |
 | Bot doesn't respond to DMs | Make sure your user ID is in `auth.allowed_users` in config.toml |
 | "failed to spawn claude" error | Ensure `claude` CLI is in PATH and authenticated. On NixOS, use an FHS wrapper script as `binary` |
-| Bot responds but Claude output is empty | Check stderr logs — Claude errors are now logged. Verify `default_cwd` is valid |
+| Bot responds but Claude output is empty | Check stderr logs -- Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
-| Follow-up messages start new conversations | Check logs for `claude_session_id` — the session may have expired |
+| Follow-up messages start new conversations | The bot now warns you when a session is expired/stopped and asks to confirm before starting a new one. Check logs for `claude_session_id` if issues persist |
 | Ctrl+C doesn't work | Fixed in v0.2.0: Claude subprocesses now run in their own process group, so SIGINT only reaches the bot which handles graceful shutdown |
-| "Invalid Form Body (name)" error | Thread name exceeded 100 chars — this is now fixed with proper truncation |
+| "Invalid Form Body (name)" error | Thread name exceeded 100 chars -- this is now fixed with proper truncation |
 
 ## Roadmap
 
 Potential future features:
 
-- **Session list with details** — Enhance `/sessions` to show thread links, project names, and session age
-- **Multi-user session sharing** — Allow other authorized users to interact with a session in the same thread; adjust audit (new table?), to handle user requests and their messages
-- **File attachment support** — Send files/images via Discord attachments for Claude to read
-- **Reaction-based permission approval** — Use Discord reaction buttons instead of text replies for permission prompts
-- **Thread aware follow-up warnings** - regarding issue `Follow-up messages start new conversations` - backend follows with additional message, asks user about new conversation (backend waits for user answer, timeout)
-- **`/health` endpoint** - to enable monitoring status of the service. Simple `Axum` or `Hyper` crate usage.
-- **Claude code binary** - change container & the way Claude is installed. Get inspired by the `shell.nix`. Claude is now installed as a standalone binary app.
+- **Session list with details** -- Enhance `/sessions` to show thread links, project names, and session age
+- **File attachment support** -- Send files/images via Discord attachments for Claude to read
+- **Reaction-based permission approval** -- Use Discord reaction buttons instead of text replies for permission prompts
+- **`/health` endpoint** -- Enable monitoring status of the service. Simple `Axum` or `Hyper` crate usage.
 
 ## Related Projects
 
-- [claude-code-discord](https://github.com/zebbern/claude-code-discord) — TypeScript/Deno, uses Claude Agent SDK directly
-- [claude-code-discord-bridge](https://github.com/ebibibi/claude-code-discord-bridge) — TypeScript, thread-per-session with git worktrees
-- [discord-agent-bridge](https://github.com/DoBuDevel/discord-agent-bridge) — tmux polling approach
-- [Claude-Code-Remote](https://github.com/JessyTsui/Claude-Code-Remote) — Email/Discord/Telegram control
+- [claude-code-discord](https://github.com/zebbern/claude-code-discord) -- TypeScript/Deno, uses Claude Agent SDK directly
+- [claude-code-discord-bridge](https://github.com/ebibibi/claude-code-discord-bridge) -- TypeScript, thread-per-session with git worktrees
+- [discord-agent-bridge](https://github.com/DoBuDevel/discord-agent-bridge) -- tmux polling approach
+- [Claude-Code-Remote](https://github.com/JessyTsui/Claude-Code-Remote) -- Email/Discord/Telegram control
 
 Inspired by the discussion at [anthropics/claude-code#15922](https://github.com/anthropics/claude-code/issues/15922).
 

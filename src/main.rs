@@ -27,8 +27,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Connect DB
-    let pool = sqlx::SqlitePool::connect(config.database.url.as_ref()).await?;
+    // Connect DB with WAL mode and foreign keys
+    let pool_opts = config
+        .database
+        .url
+        .parse::<sqlx::sqlite::SqliteConnectOptions>()?
+        .pragma("journal_mode", "WAL")
+        .pragma("foreign_keys", "ON");
+    let pool = sqlx::SqlitePool::connect_with(pool_opts).await?;
     claude_remote_chat::db::run_migrations(&pool).await?;
 
     // Clean up orphaned worktrees from previous crash/shutdown

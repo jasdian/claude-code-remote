@@ -1,10 +1,8 @@
-FROM node:22-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git \
+    ca-certificates git curl \
     && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 COPY claude-remote-chat /app/claude-remote-chat
@@ -15,4 +13,10 @@ RUN useradd -r -m appuser \
     && chmod +x /app/claude-remote-chat
 
 USER appuser
+
+# Install Claude Code as standalone binary (not via npm)
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+ENV PATH="/home/appuser/.local/bin:${PATH}"
+
 ENTRYPOINT ["/app/claude-remote-chat"]
