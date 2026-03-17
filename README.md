@@ -75,6 +75,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
 - **Git worktree isolation** -- optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
+- **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a GitHub PR via `gh` CLI if there are commits ahead of the default branch
 - Session timeout and automatic cleanup
 - stderr capture -- Claude process errors are logged and surfaced to Discord
 
@@ -187,11 +188,13 @@ session_timeout_minutes = 30                         # Auto-kill after inactivit
 # system_prompt = "Keep responses concise."          # Optional system prompt
 # dangerously_skip_permissions = false               # Skip all permission prompts
 # use_worktrees = false                              # Git worktree per session
+# auto_pr = false                                    # Auto-create PR on /end
 
 [claude.projects.myapp]                              # Named project overrides
 cwd = "/home/you/projects/myapp"
 # allowed_tools = ["Read", "Grep"]                   # Restrict tools per project
 # use_worktrees = true                               # Override per project
+# auto_pr = true                                     # Override auto-PR per project
 
 [auth]
 admins = [123456789012345678]                        # Can /approve, /revoke, /pending

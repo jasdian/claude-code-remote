@@ -42,6 +42,8 @@ struct RawClaudeConfig {
     dangerously_skip_permissions: bool,
     #[serde(default)]
     use_worktrees: bool,
+    #[serde(default)]
+    auto_pr: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +51,7 @@ struct RawProjectConfig {
     cwd: String,
     allowed_tools: Option<Vec<String>>,
     use_worktrees: Option<bool>,
+    auto_pr: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +135,7 @@ pub struct ClaudeConfig {
     pub system_prompt: Option<Arc<str>>,
     pub dangerously_skip_permissions: bool,
     pub use_worktrees: bool,
+    pub auto_pr: bool,
 }
 
 #[derive(Debug)]
@@ -139,6 +143,7 @@ pub struct ProjectConfig {
     pub cwd: Arc<str>,
     pub allowed_tools: Option<SmallVec<[Arc<str>; 8]>>,
     pub use_worktrees: Option<bool>,
+    pub auto_pr: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -177,6 +182,15 @@ impl ClaudeConfig {
             .and_then(|p| self.projects.get(p))
             .and_then(|pc| pc.use_worktrees)
             .unwrap_or(self.use_worktrees)
+    }
+
+    /// Resolve whether auto-PR creation is enabled for a project.
+    #[inline]
+    pub fn resolve_auto_pr(&self, project: Option<&str>) -> bool {
+        project
+            .and_then(|p| self.projects.get(p))
+            .and_then(|pc| pc.auto_pr)
+            .unwrap_or(self.auto_pr)
     }
 
     /// P1/P4: Resolve cwd. Config lookup → sibling directory → error if named project not found.
@@ -243,6 +257,7 @@ impl AppConfig {
                                 .allowed_tools
                                 .map(|tools| tools.iter().map(|s| Arc::from(s.as_str())).collect()),
                             use_worktrees: v.use_worktrees,
+                            auto_pr: v.auto_pr,
                         };
                         (Arc::from(k.as_str()), pc)
                     })
@@ -258,6 +273,7 @@ impl AppConfig {
                 system_prompt: raw.claude.system_prompt.map(|s| Arc::from(s.as_str())),
                 dangerously_skip_permissions: raw.claude.dangerously_skip_permissions,
                 use_worktrees: raw.claude.use_worktrees,
+                auto_pr: raw.claude.auto_pr,
             },
             database: DatabaseConfig {
                 url: Arc::from(raw.database.url.as_str()),

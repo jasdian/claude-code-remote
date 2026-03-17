@@ -88,7 +88,8 @@ pub async fn create_worktree(repo_root: &Path, thread_id: ThreadId) -> Result<Pa
 }
 
 /// Remove a worktree by path. Best-effort — logs errors, never fails.
-pub async fn remove_worktree(worktree_path: &Path) {
+/// If `keep_branch` is true, the git branch is preserved (e.g. for a PR).
+pub async fn remove_worktree(worktree_path: &Path, keep_branch: bool) {
     // Derive repo root: worktree is at {repo_root}/.claude-worktrees/{tid}
     let repo_root = worktree_path.parent().and_then(Path::parent);
 
@@ -99,8 +100,9 @@ pub async fn remove_worktree(worktree_path: &Path) {
 
     remove_worktree_impl(repo_root, worktree_path).await;
 
-    // Try to delete the branch too
-    if let Some(tid_str) = worktree_path.file_name().and_then(|n| n.to_str()) {
+    if !keep_branch
+        && let Some(tid_str) = worktree_path.file_name().and_then(|n| n.to_str())
+    {
         let branch = format!("{BRANCH_PREFIX}{tid_str}");
         let _ = Command::new("git")
             .args(["branch", "-D", &branch])
@@ -141,6 +143,134 @@ async fn remove_worktree_impl(repo_root: &Path, worktree_path: &Path) {
             let _ = tokio::fs::remove_dir_all(worktree_path).await;
         }
     }
+}
+
+/// Detect the default branch (main/master) of a repository.
+async fn detect_default_branch(repo_root: &Path) -> Option<String> {
+    // Try origin/HEAD first
+    let output = Command::new("git")
+        .args(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()?;
+
+    if output.status.success() {
+        let full = String::from_utf8_lossy(&output.stdout);
+        // Returns "origin/main" — strip "origin/"
+        return full.trim().strip_prefix("origin/").map(String::from);
+    }
+
+    // Fallback: check if main or master branch exists locally
+    for name in &["main", "master"] {
+        let output = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{name}")])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .ok()?;
+        if output.status.success() {
+            return Some((*name).to_string());
+        }
+    }
+
+    None
+}
+
+/// Try to create a PR from the worktree branch if it has commits ahead of the
+/// default branch. Best-effort: returns the PR URL on success, None otherwise.
+/// Requires `gh` CLI to be available.
+pub async fn try_create_pr(worktree_path: &Path, project: &str) -> Option<String> {
+    let repo_root = worktree_path.parent().and_then(Path::parent)?;
+    let tid_str = worktree_path.file_name()?.to_str()?;
+    let branch = format!("{BRANCH_PREFIX}{tid_str}");
+
+    let default_branch = detect_default_branch(repo_root).await?;
+
+    // Count commits ahead of default branch
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &format!("{default_branch}..HEAD")])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let count: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    if count == 0 {
+        tracing::debug!(%branch, "no commits ahead of {default_branch}, skipping PR");
+        return None;
+    }
+
+    // Gather commit log for PR body
+    let log_output = Command::new("git")
+        .args([
+            "log",
+            "--oneline",
+            &format!("{default_branch}..HEAD"),
+        ])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .ok()?;
+    let commits = String::from_utf8_lossy(&log_output.stdout);
+
+    // Use first commit subject as PR title
+    let first_subject = commits.lines().last().unwrap_or("Claude session changes");
+    let title = if count == 1 {
+        first_subject.split_once(' ').map_or(first_subject, |(_, msg)| msg).to_string()
+    } else {
+        format!("{project}: {count} changes from session {tid_str}")
+    };
+
+    // Push branch to remote
+    let push = Command::new("git")
+        .args(["push", "-u", "origin", &branch])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()?;
+
+    if !push.status.success() {
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        tracing::warn!(%branch, %stderr, "failed to push branch for auto-PR");
+        return None;
+    }
+
+    // Create PR via gh CLI
+    let body = format!(
+        "Auto-created by `/end` from Discord session.\n\n\
+         **Commits ({count}):**\n```\n{commits}```"
+    );
+
+    let pr = Command::new("gh")
+        .args([
+            "pr", "create",
+            "--head", &branch,
+            "--base", &default_branch,
+            "--title", &title,
+            "--body", &body,
+        ])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .ok()?;
+
+    if !pr.status.success() {
+        let stderr = String::from_utf8_lossy(&pr.stderr);
+        tracing::warn!(%branch, %stderr, "gh pr create failed");
+        return None;
+    }
+
+    let url = String::from_utf8_lossy(&pr.stdout).trim().to_string();
+    tracing::info!(%branch, %url, count, "auto-created PR");
+    Some(url)
 }
 
 /// Resolve the effective cwd for a Claude session.
@@ -216,7 +346,7 @@ pub async fn cleanup_orphaned(pool: &SqlitePool) {
     tracing::info!(count = rows.len(), "cleaning up orphaned worktrees");
 
     for (tid, path) in &rows {
-        remove_worktree(Path::new(path)).await;
+        remove_worktree(Path::new(path), false).await;
         let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
             .bind(tid)
             .execute(pool)

@@ -25,11 +25,16 @@ session_timeout_minutes = 30
 # Each session gets its own worktree at {repo}/.claude-worktrees/{thread_id}.
 # use_worktrees = false
 
+# Automatically create a PR when /end is called if the worktree branch has commits.
+# Requires `gh` CLI authenticated. Per-project override available.
+# auto_pr = false
+
 # Per-project overrides: use /claude <prompt> myapp to activate
 [claude.projects.myapp]
 cwd = "/home/you/projects/myapp"
 # allowed_tools = ["Read", "Grep"]   # Override tools for this project
 # use_worktrees = true               # Override worktree setting per project
+# auto_pr = true                     # Override auto-PR per project
 
 [auth]
 admins = [123456789012345678]          # Can /approve, /revoke, /pending

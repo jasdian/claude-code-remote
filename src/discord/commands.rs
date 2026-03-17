@@ -149,29 +149,50 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
         }
     }
 
-    let had_session = if let Some((handle, wt_path)) = ctx.data().session_manager.remove(thread_id)
+    // Resolve worktree path from either active session or DB
+    let wt_path: Option<std::path::PathBuf> = if let Some((handle, wt_path)) =
+        ctx.data().session_manager.remove(thread_id)
     {
         handle.kill().await?;
-        if let Some(ref wt) = wt_path {
-            crate::claude::worktree::remove_worktree(wt).await;
-        }
-        crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
-        true
-    } else if session.is_some() {
-        // Clean up worktree from DB even if no active process
-        if let Some(ref s) = session
-            && let Some(ref wt) = s.worktree_path
-        {
-            crate::claude::worktree::remove_worktree(std::path::Path::new(wt.as_ref())).await;
-        }
-        crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
-        true
+        wt_path
     } else {
-        false
+        session
+            .as_ref()
+            .and_then(|s| s.worktree_path.as_deref())
+            .map(std::path::PathBuf::from)
     };
 
+    let had_session = session.is_some();
+
     if had_session {
-        ctx.say("Session ended.").await?;
+        // Try auto-PR before cleaning up the worktree
+        let project = session.as_ref().map(|s| s.project.as_ref()).unwrap_or("");
+        let auto_pr = ctx
+            .data()
+            .config
+            .claude
+            .resolve_auto_pr(Some(project));
+        let mut pr_url: Option<String> = None;
+
+        if auto_pr
+            && let Some(ref wt) = wt_path
+        {
+            pr_url = crate::claude::worktree::try_create_pr(wt, project).await;
+        }
+
+        // Remove worktree; keep branch alive if PR was created
+        let keep_branch = pr_url.is_some();
+        if let Some(ref wt) = wt_path {
+            crate::claude::worktree::remove_worktree(wt, keep_branch).await;
+        }
+
+        crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
+
+        let msg = match pr_url {
+            Some(url) => format!("Session ended. PR created: {url}"),
+            None => "Session ended.".to_string(),
+        };
+        ctx.say(&msg).await?;
         // Archive the thread (not in DMs)
         if ctx.guild_id().is_some() {
             let channel = ctx.channel_id();

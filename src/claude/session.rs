@@ -182,7 +182,7 @@ impl SessionManager {
             if let Some((_, session)) = self.active.remove(&tid) {
                 let _ = session.handle.kill().await;
                 if let Some(ref wt) = session.worktree_path {
-                    super::worktree::remove_worktree(wt).await;
+                    super::worktree::remove_worktree(wt, false).await;
                 }
                 tracing::info!(?tid, "killed session on shutdown");
             }
@@ -205,7 +205,7 @@ impl SessionManager {
             if let Some((_, session)) = self.active.remove(tid) {
                 let _ = session.handle.kill().await;
                 if let Some(ref wt) = session.worktree_path {
-                    super::worktree::remove_worktree(wt).await;
+                    super::worktree::remove_worktree(wt, false).await;
                 }
                 tracing::info!(?tid, "reaped expired session");
             }
