@@ -7,6 +7,7 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
     volumes:
       - db-data:/data
+      - claude-state:/home/appuser/.claude
       - ./config.prod.toml:/app/config.toml:ro
       - /home/you/projects:/projects
     logging:
@@ -17,3 +18,4 @@ services:
 
 volumes:
   db-data:
+  claude-state:

@@ -277,6 +277,7 @@ docker run -d \
   --restart unless-stopped \
   -e ANTHROPIC_API_KEY \
   -v claude-data:/data \
+  -v claude-state:/home/appuser/.claude \
   -v ./config.prod.toml:/app/config.toml:ro \
   -v /home/you/projects:/projects \
   claude-remote-chat
@@ -287,6 +288,7 @@ docker run -d \
 | Mount | Purpose |
 |-------|---------|
 | `/data` | SQLite database (named volume) |
+| `/home/appuser/.claude` | Claude CLI session state and settings (named volume) |
 | `/app/config.toml` | Configuration file (bind mount, read-only) |
 | `/projects` | Project directories Claude works on (bind mount) |
 
