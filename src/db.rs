@@ -213,15 +213,32 @@ pub async fn log_tool_use(
     thread_id: ThreadId,
     tool: &str,
     input_preview: &str,
-) -> Result<(), AppError> {
+) -> Result<i64, AppError> {
     let tid = thread_id.get() as i64;
-    sqlx::query("INSERT INTO tool_uses (thread_id, tool, input_preview) VALUES (?, ?, ?)")
-        .bind(tid)
-        .bind(tool)
-        .bind(input_preview)
-        .execute(pool)
-        .await?;
-    Ok(())
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO tool_uses (thread_id, tool, input_preview) VALUES (?, ?, ?) RETURNING id",
+    )
+    .bind(tid)
+    .bind(tool)
+    .bind(input_preview)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn get_tool_uses(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<Vec<(i64, String, String, String)>, AppError> {
+    let tid = thread_id.get() as i64;
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, tool, input_preview, created_at FROM tool_uses
+         WHERE thread_id = ? ORDER BY id",
+    )
+    .bind(tid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 // --- Access requests ---

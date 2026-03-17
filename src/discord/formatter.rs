@@ -159,13 +159,16 @@ async fn stream_events(
                             in_code_fence = false;
                         }
                         // Log to audit table (best-effort)
-                        if let Err(e) = crate::db::log_tool_use(
+                        let msg = match crate::db::log_tool_use(
                             &state.db, thread_id, &tool, &input_preview,
                         ).await {
-                            tracing::warn!(?thread_id, tool = &*tool, error = %e, "failed to log tool use");
-                        }
-                        send_message(http, channel_id,
-                            &format!("_Using {} ..._", &*tool)).await;
+                            Ok(id) => format!("_Using {} ..._ `#{id}`", &*tool),
+                            Err(e) => {
+                                tracing::warn!(?thread_id, tool = &*tool, error = %e, "failed to log tool use");
+                                format!("_Using {} ..._", &*tool)
+                            }
+                        };
+                        send_message(http, channel_id, &msg).await;
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error }) => {
                         let status = if is_error { "failed" } else { "done" };

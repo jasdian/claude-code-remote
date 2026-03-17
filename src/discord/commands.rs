@@ -264,6 +264,37 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
+#[poise::command(slash_command)]
+pub async fn audit(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_admin(&ctx)?;
+    let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
+    let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id).await?;
+    if rows.is_empty() {
+        ctx.say("No tool uses recorded for this thread.").await?;
+    } else {
+        let mut out = String::from("**Tool audit:**\n");
+        for (id, tool, preview, ts) in &rows {
+            let preview_str = if preview.is_empty() {
+                String::new()
+            } else {
+                format!(" — `{preview}`")
+            };
+            out.push_str(&format!("`#{id}` **{tool}**{preview_str} ({ts})\n"));
+        }
+        // Chunk if over Discord limit
+        if out.len() > 2000 {
+            for chunk in out.as_bytes().chunks(1990) {
+                let s = String::from_utf8_lossy(chunk);
+                ctx.channel_id().say(ctx.http(), &*s).await?;
+            }
+        } else {
+            ctx.say(out).await?;
+        }
+    }
+    Ok(())
+}
+
 /// Truncate prompt at word boundary for display in the startup message.
 #[inline]
 fn truncate_prompt(prompt: &str, max: usize) -> String {
