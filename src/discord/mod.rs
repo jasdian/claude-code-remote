@@ -25,6 +25,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
                 commands::approve(),
                 commands::revoke(),
                 commands::pending(),
+                commands::compact(),
                 commands::audit(),
             ],
             event_handler: |ctx, event, _fw_ctx, state| {

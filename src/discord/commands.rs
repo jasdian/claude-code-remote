@@ -265,6 +265,62 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
 }
 
 #[poise::command(slash_command)]
+pub async fn compact(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_auth(&ctx).await?;
+
+    let state = ctx.data();
+    let thread_id = ThreadId::from(ctx.channel_id());
+
+    let session = crate::db::get_session_by_thread(&state.db, thread_id).await?;
+    let Some(session) = session else {
+        ctx.say("No session here.").await?;
+        return Ok(());
+    };
+
+    // If busy, queue the compact command
+    if state.session_manager.has_session(thread_id) {
+        state
+            .session_manager
+            .queue_message(thread_id, "/compact".to_string());
+        ctx.say("📨 _Compact queued._").await?;
+        return Ok(());
+    }
+
+    // Resume with /compact
+    let config = &state.config.claude;
+    let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
+    let cwd_str = config.resolve_cwd(Some(&session.project)).await?;
+    let cwd = Path::new(cwd_str.as_ref());
+    let tools = config.resolve_tools(Some(&session.project));
+
+    let (tx, rx) = crate::claude::process::event_channel();
+    let cancel = state.shutdown.child_token();
+
+    let handle =
+        crate::claude::process::run_claude(config, "/compact", resume_id, cwd, &tools, tx, cancel)
+            .await?;
+
+    state
+        .session_manager
+        .register(thread_id, handle, cwd.to_path_buf())?;
+    crate::db::touch_session(&state.db, thread_id).await?;
+
+    ctx.say("_Compacting conversation..._").await?;
+
+    let stream_cancel = state.shutdown.child_token();
+    tokio::spawn(super::formatter::stream_to_discord(
+        Arc::clone(&ctx.serenity_context().http),
+        ctx.channel_id(),
+        rx,
+        state.clone(),
+        stream_cancel,
+    ));
+
+    Ok(())
+}
+
+#[poise::command(slash_command)]
 pub async fn audit(
     ctx: Context<'_>,
     #[description = "Tool use ID (omit for latest)"] id: Option<i64>,

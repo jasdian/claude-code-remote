@@ -207,6 +207,7 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | *@mention bot* | Session thread | Continue the conversation |
 | `/interrupt [prompt]` | Session thread | Kill current task, optionally send new prompt |
 | `!message` | Session thread | Interrupt current task and send message |
+| `/compact` | Session thread | Summarize conversation to reduce context usage |
 | `/end` | Session thread | Stop session and archive the thread |
 | `/sessions` | Anywhere | Show active session count |
 
@@ -219,6 +220,7 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | `/approve <user>` | Anywhere | Admin: approve a pending request (ephemeral) |
 | `/revoke <user>` | Anywhere | Admin: revoke a user's access (ephemeral) |
 | `/pending` | Anywhere | Admin: list pending requests (ephemeral) |
+| `/audit [id] [count]` | Session thread | Admin: view tool usage audit log (ephemeral) |
 
 After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
 
