@@ -84,7 +84,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - No secrets in Discord -- Claude runs locally on your machine
 
 **Operations**
-- SQLite session persistence (survives bot restarts)
+- SQLite session persistence (survives bot restarts -- active sessions are reconciled to idle on startup so they can be resumed)
 - TOML configuration
 - Structured logging via `tracing` with custom poise error handler
 - Graceful shutdown (SIGINT/SIGTERM with 5s timeout)
@@ -366,8 +366,59 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 | Bot responds but Claude output is empty | Check stderr logs -- Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
 | Follow-up messages start new conversations | The bot now warns you when a session is expired/stopped and asks to confirm before starting a new one. Check logs for `claude_session_id` if issues persist |
+| Sessions stuck after bot restart | Fixed: on startup the bot reconciles all "active" sessions to "idle", so the next message in the thread resumes normally |
 | Ctrl+C doesn't work | Fixed in v0.2.0: Claude subprocesses now run in their own process group, so SIGINT only reaches the bot which handles graceful shutdown |
 | "Invalid Form Body (name)" error | Thread name exceeded 100 chars -- this is now fixed with proper truncation |
+
+## Health Warning
+
+> [!CAUTION]
+> **Vibe-coding is addictive. Protect your mental health.**
+>
+> This tool can easily turn you into a x100 developer. That feeling is intoxicating -- and
+> therein lies the danger. Extended AI-assisted coding sessions (8+ hours) are associated with
+> measurable cognitive and psychological harm. Managing multiple concurrent threads amplifies the risk.
+>
+> **What the research shows:**
+>
+> - **Brain changes from extended screen time** -- Excessive sessions reduce gray matter volume in the
+>   prefrontal cortex (executive function, attention, working memory) and alter white matter integrity.
+>   These effects compound with duration and frequency.
+>   ([Neophytou et al., 2021](https://link.springer.com/article/10.1007/s11469-019-00182-2);
+>   [Small et al., 2020](https://www.tandfonline.com/doi/full/10.31887/DCNS.2020.22.2/gsmall))
+>
+> - **Flow state becomes addictive without recovery** -- Flow is protective *only* when followed by
+>   adequate rest. Without it, flow accelerates burnout and develops into obsessive, compulsive
+>   engagement patterns. 39-83% of developers already exhibit burnout symptoms.
+>   ([Aust & Beneke, 2022](https://www.mdpi.com/1660-4601/19/7/3865);
+>   [Almeida et al., 2022](https://www.sciencedirect.com/science/article/pii/S0950584922002257))
+>
+> - **Technostress is a validated clinical construct** -- Five empirically identified stressors
+>   (overload, invasion, complexity, insecurity, uncertainty) decrease job satisfaction and
+>   cognitive performance.
+>   ([Tarafdar et al., 2007](https://pubsonline.informs.org/doi/10.1287/isre.1070.0165);
+>   [Fischer & Riedl, 2022](https://www.tandfonline.com/doi/full/10.1080/0960085X.2022.2154712))
+>
+> **What to do about it:**
+>
+> - **Nature exposure restores directed attention** -- As little as 10-15 minutes outdoors measurably
+>   improves executive attention and working memory. A 90-minute nature walk reduces rumination and
+>   decreases activity in brain regions linked to depression.
+>   ([Berman et al., 2008](https://journals.sagepub.com/doi/abs/10.1111/j.1467-9280.2008.02225.x);
+>   [Bratman et al., 2015](https://www.pnas.org/doi/10.1073/pnas.1510459112))
+>
+> - **Walking boosts creativity by 60%** -- Even short walks (indoors or outdoors) significantly
+>   improve divergent thinking, with residual benefits persisting after sitting back down.
+>   ([Oppezzo & Schwartz, 2014](https://pubmed.ncbi.nlm.nih.gov/24749966/))
+>
+> - **Take a full no-tech day off** between marathon sessions. Digital detox is not optional -- it is
+>   maintenance. Your brain needs time in environments that provide what Kaplan's Attention
+>   Restoration Theory calls "soft fascination" -- nature, not screens.
+>   ([Kaplan, 1995](https://www.sciencedirect.com/science/article/abs/pii/0272494495900012);
+>   [Stevenson et al., 2018](https://www.tandfonline.com/doi/full/10.1080/10937404.2016.1196155))
+>
+> **The rule of thumb:** For every deep vibe-coding session, schedule equal recovery time away from
+> all screens. Go outside. Touch grass. Your future self -- and your prefrontal cortex -- will thank you.
 
 ## Roadmap
 

@@ -37,6 +37,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlx::SqlitePool::connect_with(pool_opts).await?;
     claude_remote_chat::db::run_migrations(&pool).await?;
 
+    // Reconcile sessions left "active" by a previous crash/shutdown —
+    // mark them "idle" so they can be resumed on the next message.
+    let reconciled = claude_remote_chat::db::reconcile_stale_sessions(&pool).await?;
+    if reconciled > 0 {
+        tracing::info!(
+            count = reconciled,
+            "reconciled stale active sessions to idle"
+        );
+    }
+
     // Clean up orphaned worktrees from previous crash/shutdown
     claude_remote_chat::claude::worktree::cleanup_orphaned(&pool).await;
 

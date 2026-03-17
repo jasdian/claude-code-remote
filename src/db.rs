@@ -160,6 +160,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     Ok(())
 }
 
+/// On startup, mark all "active" sessions as "idle".
+/// After a crash/reboot no Claude process is running, but the session ID is
+/// still valid for `--resume`.  Setting them to "idle" lets the next message
+/// in the thread resume the session normally.
+pub async fn reconcile_stale_sessions(pool: &SqlitePool) -> Result<u64, AppError> {
+    let result = sqlx::query(&format!(
+        "UPDATE sessions SET status = ?, last_active_at = {NOW_UTC} WHERE status = ?"
+    ))
+    .bind(SessionStatus::Idle.as_str())
+    .bind(SessionStatus::Active.as_str())
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 // --- Session CRUD ---
 
 pub async fn create_session(
