@@ -9,7 +9,10 @@ RUN npm install -g @anthropic-ai/claude-code
 WORKDIR /app
 COPY claude-remote-chat /app/claude-remote-chat
 
-RUN mkdir -p /data /projects \
+RUN useradd -r -m appuser \
+    && mkdir -p /data /projects \
+    && chown appuser:appuser /data /projects /app \
     && chmod +x /app/claude-remote-chat
 
+USER appuser
 ENTRYPOINT ["/app/claude-remote-chat"]
