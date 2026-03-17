@@ -375,8 +375,9 @@ Potential future features:
 
 - **Session list with details** -- Enhance `/sessions` to show thread links, project names, and session age
 - **File attachment support** -- Send files/images via Discord attachments for Claude to read
-- **Reaction-based permission approval** -- Use Discord reaction buttons instead of text replies for permission prompts
+- **Reaction-based permission approval** -- Use Discord reaction buttons instead of text replies for permission prompts; collab sessions need quorum approvals
 - **`/health` endpoint** -- Enable monitoring status of the service. Simple `Axum` or `Hyper` crate usage.
+- **Co-authored commits** -- Map Discord users to GitHub usernames/emails so commits from collaborative sessions include `Co-Authored-By` trailers for all participants
 
 ## Related Projects
 

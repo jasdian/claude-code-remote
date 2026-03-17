@@ -312,6 +312,23 @@ pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(),
     Ok(())
 }
 
+/// Persist the worktree path for a session (idempotent — skips if already set).
+pub async fn set_worktree_path(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    worktree_path: &str,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query(
+        "UPDATE sessions SET worktree_path = ? WHERE thread_id = ? AND worktree_path IS NULL",
+    )
+    .bind(worktree_path)
+    .bind(tid)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // --- Session participants ---
 
 pub async fn add_participant(
@@ -526,6 +543,21 @@ pub async fn get_tool_uses(
         }
     };
     // Results come DESC, reverse to chronological order
+    Ok(rows.into_iter().rev().collect())
+}
+
+/// Fetch recent tool uses across ALL threads (for use outside a session thread).
+pub async fn get_tool_uses_global(
+    pool: &SqlitePool,
+    count: i64,
+) -> Result<Vec<ToolUseRow>, AppError> {
+    let rows: Vec<ToolUseRow> = sqlx::query_as(
+        "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+         FROM tool_uses ORDER BY id DESC LIMIT ?",
+    )
+    .bind(count)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().rev().collect())
 }
 

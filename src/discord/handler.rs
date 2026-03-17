@@ -7,6 +7,17 @@ use crate::AppState;
 use crate::domain::{SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 
+/// Best-effort reaction — log on failure but never abort the handler.
+#[inline]
+async fn try_react(ctx: &serenity::Context, msg: &serenity::Message, emoji: &str) {
+    if let Err(e) = msg
+        .react(ctx, serenity::ReactionType::Unicode(emoji.into()))
+        .await
+    {
+        tracing::warn!(emoji, error = %e, "failed to add reaction (missing Add Reactions permission?)");
+    }
+}
+
 /// Timeout for "start new session?" confirmation (seconds).
 const CONFIRM_TIMEOUT_SECS: u64 = 60;
 
@@ -108,8 +119,7 @@ pub async fn handle_message(
             // Check if there's a pending reply waiter (AskUserQuestion / permission)
             if let Some(reply_tx) = state.session_manager.take_reply_waiter(thread_id) {
                 let _ = reply_tx.send(prompt.to_string());
-                msg.react(ctx, serenity::ReactionType::Unicode("💬".into()))
-                    .await?;
+                try_react(ctx, msg, "💬").await;
                 tracing::info!(?thread_id, "routed reply to control_request waiter");
                 return Ok(());
             }
@@ -129,8 +139,7 @@ pub async fn handle_message(
                     },
                 );
                 state.session_manager.interrupt(thread_id);
-                msg.react(ctx, serenity::ReactionType::Unicode("⏭️".into()))
-                    .await?;
+                try_react(ctx, msg, "⏭️").await;
             } else {
                 state.session_manager.queue_message(
                     thread_id,
@@ -140,8 +149,7 @@ pub async fn handle_message(
                         content: Arc::from(prompt.as_ref()),
                     },
                 );
-                msg.react(ctx, serenity::ReactionType::Unicode("📨".into()))
-                    .await?;
+                try_react(ctx, msg, "📨").await;
                 tracing::info!(?thread_id, "message queued");
             }
             return Ok(());
@@ -182,8 +190,7 @@ pub async fn handle_message(
         }
         // Not affirmative — discard confirmation, ignore message
         tracing::debug!(?thread_id, "user declined new session");
-        msg.react(ctx, serenity::ReactionType::Unicode("👌".into()))
-            .await?;
+        try_react(ctx, msg, "👌").await;
         return Ok(());
     }
 
@@ -317,6 +324,13 @@ async fn start_claude(
     let handle =
         crate::claude::process::run_claude(config, prompt, resume_id, &cwd, &tools, tx, cancel)
             .await?;
+
+    // Persist worktree path to DB before register() moves it (P1: borrow first, move last)
+    if let Some(ref wt) = worktree_path
+        && let Some(wt_str) = wt.to_str()
+    {
+        let _ = crate::db::set_worktree_path(&state.db, thread_id, wt_str).await;
+    }
 
     state
         .session_manager

@@ -366,6 +366,13 @@ async fn send_session_command(
         crate::claude::process::run_claude(config, cli_cmd, resume_id, &cwd, &tools, tx, cancel)
             .await?;
 
+    // Persist worktree path to DB before register() moves it (P1: borrow first, move last)
+    if let Some(ref wt) = worktree_path
+        && let Some(wt_str) = wt.to_str()
+    {
+        let _ = crate::db::set_worktree_path(&state.db, thread_id, wt_str).await;
+    }
+
     state
         .session_manager
         .register(thread_id, handle, cwd, worktree_path)?;
@@ -428,8 +435,20 @@ pub async fn audit(
         return audit_detail(&ctx, target_id).await;
     }
 
-    let n = count.unwrap_or(1).clamp(1, 50);
-    let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id, id, n).await?;
+    let n = count.unwrap_or(10).clamp(1, 50);
+
+    // Auto-detect: if invoked inside a session thread, scope to that thread.
+    // Otherwise show global results across all threads.
+    let in_thread = crate::db::get_session_by_thread(&ctx.data().db, thread_id)
+        .await?
+        .is_some();
+
+    let rows = if in_thread {
+        crate::db::get_tool_uses(&ctx.data().db, thread_id, id, n).await?
+    } else {
+        crate::db::get_tool_uses_global(&ctx.data().db, n).await?
+    };
+
     if rows.is_empty() {
         ctx.say("No tool uses found.").await?;
     } else {
