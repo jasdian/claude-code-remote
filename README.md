@@ -18,7 +18,7 @@
 
 Your team uses Claude Code, but each person runs their own session in their own terminal. **Nobody sees what Claude is doing for someone else.** Context gets lost, work gets duplicated, and junior devs are left out of the loop.
 
-claude-remote-chat turns Claude Code into a **shared, real-time experience**. One person starts a session in Discord. Teammates jump in -- ask follow-up questions, steer Claude in a new direction, review its tool usage -- all in the same thread. Everyone sees the same streaming output, and every message is attributed to the person who sent it.
+Claude Crew turns Claude Code into a **shared, real-time experience**. One person starts a session in Discord. Teammates jump in -- ask follow-up questions, steer Claude in a new direction, review its tool usage -- all in the same thread. Everyone sees the same streaming output, and every message is attributed to the person who sent it.
 
 **Concrete scenario:** A backend engineer starts a Claude session to refactor the auth module. The security lead joins the thread to add constraints. A new hire watches the whole exchange and learns the codebase. The audit trail records who asked for what. The session runs on your machine with full file access -- nothing leaves your infrastructure.
 
