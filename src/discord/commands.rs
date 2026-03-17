@@ -10,9 +10,10 @@ use crate::error::AppError;
 #[inline]
 async fn check_auth(ctx: &Context<'_>) -> Result<(), AppError> {
     let user_id = ctx.author().id.get();
-    let auth = &ctx.data().config.auth;
+    let state = ctx.data();
+    let auth = &state.config.auth;
 
-    if auth.allowed_users.contains(&user_id) {
+    if auth.allowed_users.contains(&user_id) || auth.admins.contains(&user_id) {
         return Ok(());
     }
 
@@ -27,9 +28,12 @@ async fn check_auth(ctx: &Context<'_>) -> Result<(), AppError> {
         }
     }
 
-    Err(AppError::unauthorized(
-        "not in allowed_users or allowed_roles",
-    ))
+    // Check DB-approved users
+    if crate::db::is_user_approved(&state.db, user_id).await? {
+        return Ok(());
+    }
+
+    Err(AppError::unauthorized("not authorized"))
 }
 
 #[poise::command(slash_command)]
@@ -62,7 +66,7 @@ pub async fn claude(
             .create_thread_from_message(
                 ctx.http(),
                 msg.id,
-                serenity::CreateThread::new(truncate_thread_name(&prompt))
+                serenity::CreateThread::new(thread_name(crate::project_name_from_cwd(cwd), &prompt))
                     .auto_archive_duration(serenity::AutoArchiveDuration::OneDay),
             )
             .await?;
@@ -168,18 +172,119 @@ pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
 }
 
 #[inline]
-fn truncate_thread_name(prompt: &str) -> String {
-    const PREFIX: &str = "CC: ";
-    const SUFFIX: &str = "...";
-    const MAX: usize = 100;
-    const BUDGET: usize = MAX - PREFIX.len(); // 96
-    const TRUNC_BUDGET: usize = BUDGET - SUFFIX.len(); // 93
-
-    if prompt.len() <= BUDGET {
-        format!("{PREFIX}{prompt}")
+fn check_admin(ctx: &Context<'_>) -> Result<(), AppError> {
+    let user_id = ctx.author().id.get();
+    if ctx.data().config.auth.admins.contains(&user_id) {
+        Ok(())
     } else {
-        // Find a valid char boundary at or before TRUNC_BUDGET
-        let end = prompt.floor_char_boundary(TRUNC_BUDGET);
-        format!("{PREFIX}{}{SUFFIX}", &prompt[..end])
+        Err(AppError::unauthorized("not an admin"))
+    }
+}
+
+// --- Access request commands ---
+
+#[poise::command(slash_command)]
+pub async fn optin(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    let state = ctx.data();
+    let user_id = ctx.author().id.get();
+
+    // Already authorized?
+    if state.config.auth.allowed_users.contains(&user_id)
+        || state.config.auth.admins.contains(&user_id)
+        || crate::db::is_user_approved(&state.db, user_id).await?
+    {
+        ctx.say("You already have access.").await?;
+        return Ok(());
+    }
+
+    crate::db::create_access_request(&state.db, user_id, &ctx.author().name).await?;
+    ctx.say("Access requested. An admin will review it.").await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn optout(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    crate::db::revoke_access(&ctx.data().db, ctx.author().id.get()).await?;
+    ctx.say("Access removed.").await?;
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn approve(
+    ctx: Context<'_>,
+    #[description = "User to approve"] user: serenity::User,
+) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_admin(&ctx)?;
+    if crate::db::approve_access(&ctx.data().db, user.id.get()).await? {
+        ctx.say(format!("Approved **{}**.", user.name)).await?;
+    } else {
+        ctx.say(format!("No pending request from **{}**.", user.name))
+            .await?;
+    }
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn revoke(
+    ctx: Context<'_>,
+    #[description = "User to revoke access from"] user: serenity::User,
+) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_admin(&ctx)?;
+    if crate::db::revoke_access(&ctx.data().db, user.id.get()).await? {
+        ctx.say(format!("Revoked access for **{}**.", user.name))
+            .await?;
+    } else {
+        ctx.say(format!("**{}** has no access to revoke.", user.name))
+            .await?;
+    }
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_admin(&ctx)?;
+    let requests = crate::db::get_pending_requests(&ctx.data().db).await?;
+    if requests.is_empty() {
+        ctx.say("No pending requests.").await?;
+    } else {
+        let list = requests
+            .iter()
+            .map(|(id, name, ts)| format!("• **{name}** (<@{id}>) — {ts}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.say(format!("**Pending requests:**\n{list}")).await?;
+    }
+    Ok(())
+}
+
+/// Build a clean thread name: "project — first words of prompt"
+/// Truncates at word boundary, max 100 chars (Discord limit).
+#[inline]
+fn thread_name(project: &str, prompt: &str) -> String {
+    const MAX: usize = 100;
+    const ELLIPSIS: &str = "...";
+
+    // "project — prompt excerpt"
+    let prefix = format!("{project} — ");
+    let budget = MAX - prefix.len();
+
+    // Take first line only
+    let first_line = prompt.lines().next().unwrap_or(prompt);
+
+    if first_line.len() <= budget {
+        format!("{prefix}{first_line}")
+    } else {
+        let trunc = budget - ELLIPSIS.len();
+        let end = first_line.floor_char_boundary(trunc);
+        // Try to break at last space for clean word boundary
+        let end = first_line[..end]
+            .rfind(' ')
+            .unwrap_or(end);
+        format!("{prefix}{}{ELLIPSIS}", &first_line[..end])
     }
 }

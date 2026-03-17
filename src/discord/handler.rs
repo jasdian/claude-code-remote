@@ -13,9 +13,15 @@ fn is_dm(msg: &serenity::Message) -> bool {
     msg.guild_id.is_none()
 }
 
-/// Check if user is authorized
-fn is_authorized(state: &AppState, user_id: u64) -> bool {
-    state.config.auth.allowed_users.contains(&user_id)
+/// Check if user is authorized (config or DB-approved)
+async fn is_authorized(state: &AppState, user_id: u64) -> bool {
+    let auth = &state.config.auth;
+    if auth.allowed_users.contains(&user_id) || auth.admins.contains(&user_id) {
+        return true;
+    }
+    crate::db::is_user_approved(&state.db, user_id)
+        .await
+        .unwrap_or(false)
 }
 
 /// Strip bot mention prefix from message content. P2: returns Cow to avoid allocation when no mention.
@@ -111,7 +117,7 @@ pub async fn handle_message(
     }
 
     // No existing session — if this is a DM, auto-create one
-    if is_dm(msg) && is_authorized(state, msg.author.id.get()) {
+    if is_dm(msg) && is_authorized(state, msg.author.id.get()).await {
         tracing::info!(user = msg.author.name, "new DM session");
 
         let cwd = state.config.claude.resolve_cwd(None).await?;

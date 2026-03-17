@@ -63,6 +63,17 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await?;
 
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS access_requests (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            requested_at TEXT NOT NULL DEFAULT ({NOW_UTC})
+        )"
+    ))
+    .execute(pool)
+    .await?;
+
     sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
         .execute(pool)
         .await?;
@@ -166,4 +177,61 @@ pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(),
     .execute(pool)
     .await?;
     Ok(())
+}
+
+// --- Access requests ---
+
+pub async fn create_access_request(
+    pool: &SqlitePool,
+    user_id: u64,
+    username: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "INSERT OR REPLACE INTO access_requests (user_id, username, status)
+         VALUES (?, ?, 'pending')",
+    )
+    .bind(user_id as i64)
+    .bind(username)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn approve_access(pool: &SqlitePool, user_id: u64) -> Result<bool, AppError> {
+    let result = sqlx::query(
+        "UPDATE access_requests SET status = 'approved' WHERE user_id = ?",
+    )
+    .bind(user_id as i64)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn revoke_access(pool: &SqlitePool, user_id: u64) -> Result<bool, AppError> {
+    let result = sqlx::query("DELETE FROM access_requests WHERE user_id = ?")
+        .bind(user_id as i64)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn is_user_approved(pool: &SqlitePool, user_id: u64) -> Result<bool, AppError> {
+    let approved: bool = sqlx::query_scalar(
+        "SELECT COUNT(*) > 0 FROM access_requests WHERE user_id = ? AND status = 'approved'",
+    )
+    .bind(user_id as i64)
+    .fetch_one(pool)
+    .await?;
+    Ok(approved)
+}
+
+pub async fn get_pending_requests(
+    pool: &SqlitePool,
+) -> Result<Vec<(u64, String, String)>, AppError> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT user_id, username, requested_at FROM access_requests WHERE status = 'pending' ORDER BY requested_at",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id, name, ts)| (id as u64, name, ts)).collect())
 }

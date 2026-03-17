@@ -15,8 +15,17 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
-            commands: vec![commands::claude(), commands::end(),
-                commands::interrupt(), commands::sessions()],
+            commands: vec![
+                commands::claude(),
+                commands::end(),
+                commands::interrupt(),
+                commands::sessions(),
+                commands::optin(),
+                commands::optout(),
+                commands::approve(),
+                commands::revoke(),
+                commands::pending(),
+            ],
             event_handler: |ctx, event, _fw_ctx, state| {
                 Box::pin(async move {
                     if let poise::serenity_prelude::FullEvent::Message { new_message } = event

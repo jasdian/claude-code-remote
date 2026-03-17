@@ -153,8 +153,8 @@ cargo run
 
 ```toml
 [discord]
-token = "MTIxNzU1..."          # Bot token from Developer Portal
-guild_id = 1233628554378477589  # Your server ID
+token = "YOUR_BOT_TOKEN"          # Bot token from Developer Portal
+guild_id = 123456789012345678  # Your server ID
 
 [claude]
 binary = "claude"                                    # Path to claude CLI
@@ -170,8 +170,9 @@ cwd = "/home/you/projects/myapp"
 # allowed_tools = ["Read", "Grep"]                   # Restrict tools per project
 
 [auth]
-allowed_users = [594857943015358487]                  # Discord user IDs allowed
-allowed_roles = []                                   # Discord role IDs allowed
+admins = [123456789012345678]                        # Can /approve, /revoke, /pending
+allowed_users = [123456789012345678]                  # Always authorized (config-managed)
+allowed_roles = []                                   # Always authorized (by role)
 
 [database]
 url = "sqlite:data.db?mode=rwc"                      # SQLite DB path
@@ -196,6 +197,11 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 | `/end` | Session thread | Stop session and archive the thread |
 | `/interrupt [prompt]` | Session thread | Kill current task, optionally send new prompt |
 | `/sessions` | Anywhere | Show active session count |
+| `/optin` | Anywhere | Request access (ephemeral) |
+| `/optout` | Anywhere | Remove your own access (ephemeral) |
+| `/approve <user>` | Anywhere | Admin: approve a pending request (ephemeral) |
+| `/revoke <user>` | Anywhere | Admin: revoke a user's access (ephemeral) |
+| `/pending` | Anywhere | Admin: list pending access requests (ephemeral) |
 | *(just type)* | DM | Start or continue a Claude session |
 | *@mention bot* | Session thread | Continue the conversation |
 | `!message` | Session thread | Interrupt current task and send message |
@@ -203,6 +209,13 @@ The `allowed_tools` list controls which tools Claude can use. In headless (`-p`)
 After the initial `/claude` command in a server, just type messages in the thread — the bot picks them up automatically.
 
 If Claude is busy, your message is **queued** (📨 reaction) and sent automatically when the current task finishes. Prefix with `!` to **interrupt** (⏭️ reaction) — kills the current task and sends your message immediately.
+
+### Access Control
+
+Users can be authorized in three ways:
+1. **Config** — `allowed_users` and `admins` in `config.toml` (permanent, requires restart)
+2. **Roles** — `allowed_roles` in config (Discord role-based)
+3. **Dynamic** — `/optin` request approved by an admin via `/approve` (stored in DB, instant)
 
 ## Build Commands
 

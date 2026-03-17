@@ -27,8 +27,9 @@ cwd = "/home/you/projects/myapp"
 # allowed_tools = ["Read", "Grep"]   # Override tools for this project
 
 [auth]
-allowed_users = [123456789012345678]   # Discord user IDs
-allowed_roles = []                     # Discord role IDs
+admins = [123456789012345678]          # Can /approve, /revoke, /pending
+allowed_users = [123456789012345678]   # Always authorized (config-managed)
+allowed_roles = []                     # Always authorized (by role)
 
 [database]
 url = "sqlite:data.db?mode=rwc"

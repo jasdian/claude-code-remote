@@ -53,6 +53,8 @@ struct RawAuthConfig {
     allowed_users: Vec<u64>,
     #[serde(default)]
     allowed_roles: Vec<u64>,
+    #[serde(default)]
+    admins: Vec<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +140,7 @@ pub struct ProjectConfig {
 pub struct AuthConfig {
     pub allowed_users: SmallVec<[u64; 4]>,
     pub allowed_roles: SmallVec<[u64; 4]>,
+    pub admins: SmallVec<[u64; 4]>,
 }
 
 #[derive(Debug)]
@@ -242,6 +245,7 @@ impl AppConfig {
             auth: AuthConfig {
                 allowed_users: raw.auth.allowed_users.into_iter().collect(),
                 allowed_roles: raw.auth.allowed_roles.into_iter().collect(),
+                admins: raw.auth.admins.into_iter().collect(),
             },
             logging: LoggingConfig {
                 level: Arc::from(raw.logging.level.as_str()),
