@@ -37,7 +37,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /// Schema version tracked via SQLite user_version pragma.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     sqlx::query(&format!(
@@ -73,6 +73,23 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     ))
     .execute(pool)
     .await?;
+
+    sqlx::query(&format!(
+        "CREATE TABLE IF NOT EXISTS tool_uses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            thread_id INTEGER NOT NULL,
+            tool TEXT NOT NULL,
+            input_preview TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+            FOREIGN KEY (thread_id) REFERENCES sessions(thread_id)
+        )"
+    ))
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tool_uses_thread ON tool_uses(thread_id)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
         .execute(pool)
@@ -176,6 +193,24 @@ pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(),
     .bind(tid)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+// --- Tool audit ---
+
+pub async fn log_tool_use(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    tool: &str,
+    input_preview: &str,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query("INSERT INTO tool_uses (thread_id, tool, input_preview) VALUES (?, ?, ?)")
+        .bind(tid)
+        .bind(tool)
+        .bind(input_preview)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

@@ -52,7 +52,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - **Interrupt** — `!` prefix or `/interrupt` kills current task and sends the new message (⏭️)
 - Natural follow-ups — just type in the thread to continue
 - Smart message chunking (handles Discord's 2000-char limit)
-- Typing indicators and tool-use status with spoiler previews (click to see details)
+- Typing indicators and tool-use status (tool usage audited to SQLite)
 - `/end` archives the thread after stopping the session
 
 **Claude Code Management**

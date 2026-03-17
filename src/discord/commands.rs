@@ -53,20 +53,23 @@ pub async fn claude(
     let tools = config.resolve_tools(project.as_deref());
 
     let is_dm = ctx.guild_id().is_none();
+    let project_name = crate::project_name_from_cwd(cwd);
+    let prompt_excerpt = truncate_prompt(&prompt, 200);
+    let start_msg = format!("**{project_name}**\n> {prompt_excerpt}");
 
     // In DMs: reply directly in channel. In guilds: create a thread.
     let response_channel = if is_dm {
-        ctx.say("Starting Claude session...").await?;
+        ctx.say(&start_msg).await?;
         ctx.channel_id()
     } else {
-        let reply = ctx.say("Starting Claude session...").await?;
+        let reply = ctx.say(&start_msg).await?;
         let msg = reply.message().await?;
         let thread = ctx
             .channel_id()
             .create_thread_from_message(
                 ctx.http(),
                 msg.id,
-                serenity::CreateThread::new(thread_name(crate::project_name_from_cwd(cwd), &prompt))
+                serenity::CreateThread::new(thread_name(project_name, &prompt))
                     .auto_archive_duration(serenity::AutoArchiveDuration::OneDay),
             )
             .await?;
@@ -86,7 +89,6 @@ pub async fn claude(
         .register(thread_id, handle, cwd.to_path_buf())?;
 
     let user_id = UserId::from(ctx.author().id);
-    let project_name = crate::project_name_from_cwd(cwd);
     crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
 
     let stream_cancel = state.shutdown.child_token();
@@ -260,6 +262,19 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
         ctx.say(format!("**Pending requests:**\n{list}")).await?;
     }
     Ok(())
+}
+
+/// Truncate prompt at word boundary for display in the startup message.
+#[inline]
+fn truncate_prompt(prompt: &str, max: usize) -> String {
+    let first_line = prompt.lines().next().unwrap_or(prompt);
+    if first_line.len() <= max {
+        first_line.to_string()
+    } else {
+        let end = first_line.floor_char_boundary(max - 3);
+        let end = first_line[..end].rfind(' ').unwrap_or(end);
+        format!("{}...", &first_line[..end])
+    }
 }
 
 /// Build a clean thread name: "project — first words of prompt"

@@ -158,12 +158,14 @@ async fn stream_events(
                             send_message(http, channel_id, &chunk).await;
                             in_code_fence = false;
                         }
-                        let msg = if input_preview.is_empty() {
-                            format!("_Using {} ..._", &*tool)
-                        } else {
-                            format!("_Using {} ..._ ||`{}`||", &*tool, &*input_preview)
-                        };
-                        send_message(http, channel_id, &msg).await;
+                        // Log to audit table (best-effort)
+                        if let Err(e) = crate::db::log_tool_use(
+                            &state.db, thread_id, &tool, &input_preview,
+                        ).await {
+                            tracing::warn!(?thread_id, tool = &*tool, error = %e, "failed to log tool use");
+                        }
+                        send_message(http, channel_id,
+                            &format!("_Using {} ..._", &*tool)).await;
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error }) => {
                         let status = if is_error { "failed" } else { "done" };
