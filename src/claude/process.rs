@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -14,6 +14,7 @@ use crate::error::AppError;
 
 const STDOUT_BUF_CAPACITY: usize = 8 * 1024;
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+const STDIN_CHANNEL_CAPACITY: usize = 4;
 
 pub struct ClaudeProcessHandle {
     reader_task: JoinHandle<()>,
@@ -47,6 +48,10 @@ pub fn event_channel() -> (mpsc::Sender<ClaudeEvent>, mpsc::Receiver<ClaudeEvent
     mpsc::channel(EVENT_CHANNEL_CAPACITY)
 }
 
+pub fn stdin_channel() -> (mpsc::Sender<String>, mpsc::Receiver<String>) {
+    mpsc::channel(STDIN_CHANNEL_CAPACITY)
+}
+
 /// P4: All IO is async. P1: borrows config and prompt, never clones.
 /// `system_prompt_override`: if Some, replaces the config system_prompt entirely
 /// (used to append co-author trailers for multi-user sessions).
@@ -60,11 +65,14 @@ pub async fn run_claude(
     system_prompt_override: Option<&str>,
     event_tx: mpsc::Sender<ClaudeEvent>,
     cancel: CancellationToken,
+    stdin_rx: mpsc::Receiver<String>,
 ) -> Result<ClaudeProcessHandle, AppError> {
     let mut cmd = Command::new(config.binary.as_ref());
     cmd.arg("-p")
         .arg(prompt)
         .arg("--output-format")
+        .arg("stream-json")
+        .arg("--input-format")
         .arg("stream-json")
         .arg("--verbose");
 
@@ -92,7 +100,7 @@ pub async fn run_claude(
     }
 
     cmd.current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -104,6 +112,7 @@ pub async fn run_claude(
         binary = config.binary.as_ref(),
         ?cwd,
         resume = session_id,
+        stdin = "piped",
         "spawning claude process",
     );
 
@@ -128,11 +137,37 @@ pub async fn run_claude(
         .take()
         .ok_or_else(|| AppError::claude("no stderr from claude process"))?;
 
+    let stdin_handle = child.stdin.take();
+
     let reader_cancel = cancel.clone();
     // Move child into the reader task so we can wait() and classify exit.
     // kill_on_drop(true) ensures cleanup if the task is aborted.
     let reader_task = tokio::spawn(async move {
         let mut child = child;
+
+        // Spawn stdin writer task
+        if let Some(stdin) = stdin_handle {
+            let stdin_cancel = reader_cancel.clone();
+            tokio::spawn(async move {
+                let mut stdin = stdin;
+                let mut stdin_rx = stdin_rx;
+                tracing::debug!("stdin writer started");
+                loop {
+                    tokio::select! {
+                        _ = stdin_cancel.cancelled() => break,
+                        msg = stdin_rx.recv() => {
+                            let Some(line) = msg else { break };
+                            tracing::debug!(bytes = line.len(), "writing control_response to stdin");
+                            let mut buf = line.into_bytes();
+                            buf.push(b'\n');
+                            if stdin.write_all(&buf).await.is_err() || stdin.flush().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Spawn stderr reader to capture error output
         let stderr_task = tokio::spawn(async move {
@@ -155,7 +190,7 @@ pub async fn run_claude(
         let mut lines = reader.lines();
         let mut got_events = false;
 
-        loop {
+        'reader: loop {
             tokio::select! {
                 _ = reader_cancel.cancelled() => {
                     tracing::debug!("claude reader cancelled");
@@ -165,10 +200,13 @@ pub async fn run_claude(
                     match line_result {
                         Ok(Some(line)) => {
                             tracing::debug!(line, "claude stdout");
-                            if let Some(event) = super::parser::parse_stream_line(&line) {
+                            let events = super::parser::parse_stream_line(&line);
+                            if !events.is_empty() {
                                 got_events = true;
+                            }
+                            for event in events {
                                 if event_tx.send(event).await.is_err() {
-                                    break;
+                                    break 'reader;
                                 }
                             }
                         }

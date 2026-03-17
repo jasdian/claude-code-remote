@@ -38,8 +38,8 @@ pub async fn create_worktree(repo_root: &Path, thread_id: ThreadId) -> Result<Pa
     let worktree_path = repo_root.join(WORKTREE_DIR).join(tid.to_string());
     let branch = format!("{BRANCH_PREFIX}{tid}");
 
-    // If stale worktree dir exists, clean it up first
-    if worktree_path.exists() {
+    // If stale worktree dir exists, clean it up first (P4: async IO only)
+    if tokio::fs::metadata(&worktree_path).await.is_ok() {
         tracing::info!(?worktree_path, "removing stale worktree dir");
         remove_worktree_impl(repo_root, &worktree_path).await;
     }
@@ -109,6 +109,9 @@ pub async fn remove_worktree(worktree_path: &Path, keep_branch: bool) {
             .await;
         tracing::debug!(%branch, "deleted worktree branch");
     }
+
+    // Also clean up any orphaned CLI agent worktrees (created by Claude CLI's Agent tool)
+    cleanup_cli_worktrees(repo_root).await;
 }
 
 /// Internal: remove worktree via git command, then force-remove dir if needed.
@@ -452,8 +455,120 @@ pub async fn setup_coauthor_hook(worktree_path: &Path, coauthors_content: Option
     ensure_coauthors_excluded(worktree_path).await;
 }
 
+/// Clean up orphaned agent worktrees left behind by Claude CLI when the process
+/// is killed. CLI creates worktrees at `{repo_root}/.claude/worktrees/agent-*`
+/// with branches `worktree-agent-*`.
+///
+/// If an agent worktree has commits ahead of its base (work in progress when
+/// killed), we preserve the branch and only remove the worktree directory.
+/// If it has no unique commits, both the worktree and branch are removed.
+pub async fn cleanup_cli_worktrees(repo_root: &Path) {
+    let cli_wt_dir = repo_root.join(".claude").join("worktrees");
+
+    // Nothing to clean if directory doesn't exist
+    if tokio::fs::metadata(&cli_wt_dir).await.is_err() {
+        return;
+    }
+
+    // Prune stale worktree entries first
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_root)
+        .output()
+        .await;
+
+    // List remaining valid worktrees (still active — skip these)
+    let valid = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .await;
+    let valid_paths: Vec<String> = valid
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.strip_prefix("worktree ").map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Scan .claude/worktrees/ for agent dirs that are no longer valid worktrees
+    let mut entries = match tokio::fs::read_dir(&cli_wt_dir).await {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut cleaned = 0u32;
+    let mut preserved = 0u32;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with("agent-") {
+            continue;
+        }
+
+        let path_str = path.to_string_lossy().to_string();
+        if valid_paths.iter().any(|v| v == &path_str) {
+            continue; // still an active worktree, skip
+        }
+
+        let branch = format!("worktree-{name_str}");
+
+        // Check if the branch has commits ahead of HEAD (unmerged agent work)
+        let has_commits = has_branch_commits(repo_root, &branch).await;
+
+        // Always remove the orphaned directory
+        let _ = tokio::fs::remove_dir_all(&path).await;
+
+        if has_commits {
+            // Preserve branch — agent was killed mid-work, changes may be valuable
+            preserved += 1;
+            tracing::warn!(
+                %branch,
+                "preserved CLI agent branch with unmerged commits (worktree dir removed)"
+            );
+        } else {
+            // No unique commits — safe to delete branch too
+            let _ = Command::new("git")
+                .args(["branch", "-D", &branch])
+                .current_dir(repo_root)
+                .output()
+                .await;
+            cleaned += 1;
+            tracing::debug!(%name_str, "cleaned up orphaned CLI agent worktree");
+        }
+    }
+
+    if cleaned > 0 || preserved > 0 {
+        tracing::info!(cleaned, preserved, "CLI agent worktree cleanup complete");
+    }
+}
+
+/// Check if a branch has commits ahead of HEAD (i.e., contains unmerged work).
+async fn has_branch_commits(repo_root: &Path, branch: &str) -> bool {
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &format!("HEAD..{branch}")])
+        .current_dir(repo_root)
+        .output()
+        .await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let count: u32 = String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            count > 0
+        }
+        _ => false, // branch doesn't exist or error — treat as no commits
+    }
+}
+
 /// Clean up orphaned worktrees from stopped/expired sessions on startup.
-pub async fn cleanup_orphaned(pool: &SqlitePool) {
+/// Also cleans up CLI agent worktrees that were left behind by killed processes.
+pub async fn cleanup_orphaned(pool: &SqlitePool, config: &ClaudeConfig) {
     let rows: Vec<(i64, String)> = match sqlx::query_as(
         "SELECT thread_id, worktree_path FROM sessions
          WHERE worktree_path IS NOT NULL AND status IN ('stopped', 'expired')",
@@ -468,17 +583,23 @@ pub async fn cleanup_orphaned(pool: &SqlitePool) {
         }
     };
 
-    if rows.is_empty() {
-        return;
+    if !rows.is_empty() {
+        tracing::info!(count = rows.len(), "cleaning up orphaned worktrees");
+
+        for (tid, path) in &rows {
+            remove_worktree(Path::new(path), false).await;
+            let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
+                .bind(tid)
+                .execute(pool)
+                .await;
+        }
     }
 
-    tracing::info!(count = rows.len(), "cleaning up orphaned worktrees");
-
-    for (tid, path) in &rows {
-        remove_worktree(Path::new(path), false).await;
-        let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
-            .bind(tid)
-            .execute(pool)
-            .await;
+    // Also clean up CLI agent worktrees even if no bot worktrees are orphaned.
+    // Resolve repo root from default cwd (best-effort).
+    if let Ok(cwd_str) = config.resolve_cwd(None).await
+        && let Some(repo_root) = git_repo_root(Path::new(cwd_str.as_ref())).await
+    {
+        cleanup_cli_worktrees(&repo_root).await;
     }
 }

@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use smallvec::SmallVec;
+
 use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData};
 
 /// HOT PATH: called for every line of Claude stdout.
@@ -8,26 +10,31 @@ use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData};
 ///   {"type":"system", "session_id":"...", ...}         — init
 ///   {"type":"assistant", "message":{"content":[...]}}  — full assistant turn
 ///   {"type":"result", "result":"...", ...}              — final result
-///   {"type":"user", ...}                               — user turn echo (skip)
+///   {"type":"user", "message":{"content":[...]}}       — user turn: contains tool_result blocks
 ///   {"type":"rate_limit_event", ...}                   — rate limit info (skip)
 #[inline]
-pub fn parse_stream_line(line: &str) -> Option<ClaudeEvent> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let event_type = v.get("type")?.as_str()?;
+pub fn parse_stream_line(line: &str) -> SmallVec<[ClaudeEvent; 2]> {
+    let Some(v) = serde_json::from_str::<serde_json::Value>(line).ok() else {
+        return SmallVec::new();
+    };
+    let Some(event_type) = v.get("type").and_then(|t| t.as_str()) else {
+        return SmallVec::new();
+    };
 
     match event_type {
-        "system" => parse_system(&v),
+        "system" => parse_system(&v).into_iter().collect(),
         "assistant" => parse_assistant(&v),
-        "result" => parse_result(&v),
-        "control_request" => parse_control_request(&v),
+        "result" => parse_result(&v).into_iter().collect(),
+        "user" => parse_user(&v),
+        "control_request" => parse_control_request(&v).into_iter().collect(),
         // content_block_delta / content_block_start for API-style streaming (future)
-        "content_block_delta" => parse_content_delta(&v),
-        "content_block_start" => parse_block_start(&v),
+        "content_block_delta" => parse_content_delta(&v).into_iter().collect(),
+        "content_block_start" => parse_block_start(&v).into_iter().collect(),
         // Silently skip known non-content events
-        "user" | "rate_limit_event" => None,
+        "rate_limit_event" => SmallVec::new(),
         _ => {
             tracing::debug!(event_type, "unknown stream event");
-            None
+            SmallVec::new()
         }
     }
 }
@@ -39,98 +46,105 @@ fn parse_system(v: &serde_json::Value) -> Option<ClaudeEvent> {
         .map(|sid| ClaudeEvent::SessionId(ClaudeSessionId::new(sid)))
 }
 
+/// Parse "user" events — these contain tool_result blocks.
+/// P2: filter_map + collect for single-pass extraction.
+#[inline]
+fn parse_user(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return SmallVec::new();
+    };
+    content
+        .iter()
+        .filter_map(|block| {
+            let block_type = block.get("type").and_then(|t| t.as_str())?;
+            if block_type != "tool_result" {
+                return None;
+            }
+            let tool = block
+                .get("name")
+                .and_then(|n| n.as_str())
+                .or_else(|| block.get("tool_use_id").and_then(|id| id.as_str()))
+                .unwrap_or("unknown");
+            let is_error = block
+                .get("is_error")
+                .and_then(|e| e.as_bool())
+                .unwrap_or(false);
+            let output_preview = extract_result_preview(block);
+            Some(ClaudeEvent::ToolResult {
+                tool: Arc::from(tool),
+                is_error,
+                output_preview: Arc::from(output_preview.as_str()),
+            })
+        })
+        .collect()
+}
+
 /// Parse the "assistant" event from Claude CLI.
 /// Format: {"type":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use","name":"Bash",...}]}}
+/// P2: fold for (events, text_buf) accumulation in a single pass.
 #[inline]
-fn parse_assistant(v: &serde_json::Value) -> Option<ClaudeEvent> {
-    let message = v.get("message")?;
-    let content = message.get("content")?.as_array()?;
+fn parse_assistant(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
+    let Some(content) = v
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(|c| c.as_array())
+    else {
+        return SmallVec::new();
+    };
 
-    // Collect text and tool_use blocks into events.
-    // For simplicity, concatenate all text blocks and emit as single TextDelta.
-    // Emit ToolUse events for tool_use blocks.
-    let mut text_parts = String::new();
-    let mut events: Vec<ClaudeEvent> = Vec::new();
-
-    for block in content {
-        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        match block_type {
-            "text" => {
-                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                    text_parts.push_str(text);
+    let (mut events, text_buf) = content.iter().fold(
+        (SmallVec::<[ClaudeEvent; 2]>::new(), String::new()),
+        |(mut events, mut text_buf), block| {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match block_type {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        text_buf.push_str(text);
+                    }
                 }
-            }
-            "tool_use" => {
-                // Flush text first
-                if !text_parts.is_empty() {
-                    events.push(ClaudeEvent::TextDelta(Arc::from(text_parts.as_str())));
-                    text_parts.clear();
+                "tool_use" => {
+                    // Flush text first
+                    if !text_buf.is_empty() {
+                        events.push(ClaudeEvent::TextDelta(Arc::from(text_buf.as_str())));
+                        text_buf.clear();
+                    }
+                    if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
+                        let preview = extract_tool_preview(name, block);
+                        let input_json = extract_input_json(block);
+                        events.push(ClaudeEvent::ToolUse {
+                            tool: Arc::from(name),
+                            input_preview: Arc::from(preview.as_str()),
+                            input_json: Arc::from(input_json.as_str()),
+                        });
+                    }
                 }
-                if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
-                    let preview = extract_tool_preview(name, block);
-                    let input_json = extract_input_json(block);
-                    events.push(ClaudeEvent::ToolUse {
-                        tool: Arc::from(name),
-                        input_preview: Arc::from(preview.as_str()),
-                        input_json: Arc::from(input_json.as_str()),
-                    });
-                }
+                _ => {}
             }
-            "tool_result" => {
-                let tool = block
-                    .get("name")
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("unknown");
-                let is_error = block
-                    .get("is_error")
-                    .and_then(|e| e.as_bool())
-                    .unwrap_or(false);
-                let output_preview = extract_result_preview(block);
-                events.push(ClaudeEvent::ToolResult {
-                    tool: Arc::from(tool),
-                    is_error,
-                    output_preview: Arc::from(output_preview.as_str()),
-                });
-            }
-            _ => {}
-        }
-    }
+            (events, text_buf)
+        },
+    );
 
     // Flush remaining text
-    if !text_parts.is_empty() {
-        events.push(ClaudeEvent::TextDelta(Arc::from(text_parts.as_str())));
+    if !text_buf.is_empty() {
+        events.push(ClaudeEvent::TextDelta(Arc::from(text_buf.as_str())));
     }
 
-    // Return the first event; caller will get subsequent events from next lines.
-    // For multi-block assistant messages, we combine all text into one TextDelta.
-    // If there are tool events mixed in, we prioritize text (tools come as separate events).
-    if events.len() == 1 {
-        events.into_iter().next()
-    } else if !events.is_empty() {
-        // Multiple blocks: return first, rest will be lost.
-        // This is acceptable for PoC — full streaming would use content_block_delta.
-        events.into_iter().next()
-    } else {
-        None
-    }
+    events
 }
 
 #[inline]
 fn parse_result(v: &serde_json::Value) -> Option<ClaudeEvent> {
-    // Extract session_id if present
     if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-        // Emit SessionId first if we haven't seen it yet.
-        // The caller handles dedup via session manager.
-        // For PoC, just emit Done — session_id comes from "system" init.
         let _ = sid;
     }
 
-    // Check if there's a result text we haven't sent yet
-    // (in case the assistant event was missed or had no text)
     if let Some(result_text) = v.get("result").and_then(|r| r.as_str())
         && !result_text.is_empty()
     {
-        // We already sent text via the "assistant" event, so just emit Done
         let _ = result_text;
     }
 
@@ -201,14 +215,12 @@ fn extract_control_question(tool_name: &str, request: &serde_json::Value) -> Str
     let input = request.get("input");
 
     if tool_name == "AskUserQuestion" {
-        // Try input.question (simple form)
         if let Some(q) = input
             .and_then(|i| i.get("question"))
             .and_then(|q| q.as_str())
         {
             return q.to_string();
         }
-        // Try input.questions[0].question (array form)
         if let Some(q) = input
             .and_then(|i| i.get("questions"))
             .and_then(|qs| qs.as_array())
@@ -220,7 +232,6 @@ fn extract_control_question(tool_name: &str, request: &serde_json::Value) -> Str
         }
     }
 
-    // Fallback: use title or description from the request
     request
         .get("title")
         .and_then(|t| t.as_str())
@@ -241,13 +252,11 @@ fn extract_input_json(block: &serde_json::Value) -> String {
 /// Extract a short preview from a tool_result block's content.
 #[inline]
 fn extract_result_preview(block: &serde_json::Value) -> String {
-    // tool_result content can be a string or array of content blocks
     if let Some(content) = block.get("content") {
         if let Some(s) = content.as_str() {
             return truncate_preview(s, 200);
         }
         if let Some(arr) = content.as_array() {
-            // P2: single-pass fold, no intermediate Vec
             let text = arr
                 .iter()
                 .filter_map(|b| {
@@ -267,7 +276,6 @@ fn extract_result_preview(block: &serde_json::Value) -> String {
             }
         }
     }
-    // Fallback: try output field
     block
         .get("output")
         .and_then(|o| o.as_str())
@@ -287,7 +295,6 @@ fn truncate_preview(s: &str, max: usize) -> String {
 }
 
 /// Extract a short preview from tool input for display.
-/// Returns the most relevant field based on tool type.
 #[inline]
 fn extract_tool_preview(tool: &str, block: &serde_json::Value) -> String {
     let input = match block.get("input") {
@@ -318,7 +325,6 @@ fn extract_tool_preview(tool: &str, block: &serde_json::Value) -> String {
         _ => "",
     };
 
-    // Truncate long previews
     if preview.len() > 120 {
         let end = preview.floor_char_boundary(117);
         format!("{}...", &preview[..end])
@@ -335,8 +341,10 @@ mod tests {
     fn parse_assistant_text() {
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
-        match parse_stream_line(line) {
-            Some(ClaudeEvent::TextDelta(t)) => assert_eq!(&*t, "Hello!"),
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::TextDelta(t) => assert_eq!(&**t, "Hello!"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -344,17 +352,31 @@ mod tests {
     #[test]
     fn parse_assistant_tool_use() {
         let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"123","input":{}}]}}"#;
-        match parse_stream_line(line) {
-            Some(ClaudeEvent::ToolUse { tool, .. }) => assert_eq!(&*tool, "Bash"),
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::ToolUse { tool, .. } => assert_eq!(&**tool, "Bash"),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
+    fn parse_assistant_multi_block() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."},{"type":"tool_use","name":"Bash","id":"123","input":{"command":"ls"}},{"type":"text","text":"done"}]}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0], ClaudeEvent::TextDelta(t) if &**t == "thinking..."));
+        assert!(matches!(&events[1], ClaudeEvent::ToolUse { tool, .. } if &**tool == "Bash"));
+        assert!(matches!(&events[2], ClaudeEvent::TextDelta(t) if &**t == "done"));
+    }
+
+    #[test]
     fn parse_system_init() {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
-        match parse_stream_line(line) {
-            Some(ClaudeEvent::SessionId(sid)) => assert_eq!(sid.as_str(), "abc-123"),
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::SessionId(sid) => assert_eq!(sid.as_str(), "abc-123"),
             other => panic!("unexpected: {other:?}"),
         }
     }
@@ -362,33 +384,75 @@ mod tests {
     #[test]
     fn parse_result_done() {
         let line = r#"{"type":"result","result":"Hello!","session_id":"abc-123"}"#;
-        assert!(matches!(parse_stream_line(line), Some(ClaudeEvent::Done)));
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], ClaudeEvent::Done));
     }
 
     #[test]
-    fn parse_user_skipped() {
-        let line = r#"{"type":"user","message":{"content":"test"}}"#;
-        assert!(parse_stream_line(line).is_none());
+    fn parse_user_tool_result() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","name":"Bash","content":"hello world","is_error":false}]}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::ToolResult {
+                tool,
+                is_error,
+                output_preview,
+            } => {
+                assert_eq!(&**tool, "Bash");
+                assert!(!is_error);
+                assert_eq!(&**output_preview, "hello world");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_tool_result_error() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_abc","content":"command failed","is_error":true}]}}"#;
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::ToolResult {
+                tool,
+                is_error,
+                output_preview,
+            } => {
+                assert_eq!(&**tool, "tool_abc");
+                assert!(is_error);
+                assert_eq!(&**output_preview, "command failed");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_user_no_tool_result() {
+        let line = r#"{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#;
+        let events = parse_stream_line(line);
+        assert!(events.is_empty());
     }
 
     #[test]
     fn parse_rate_limit_skipped() {
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{}}"#;
-        assert!(parse_stream_line(line).is_none());
+        assert!(parse_stream_line(line).is_empty());
     }
 
     #[test]
     fn parse_garbage_skipped() {
-        assert!(parse_stream_line("not json at all").is_none());
-        assert!(parse_stream_line("").is_none());
+        assert!(parse_stream_line("not json at all").is_empty());
+        assert!(parse_stream_line("").is_empty());
     }
 
-    // Keep legacy content_block_delta test for future API-style streaming
     #[test]
     fn parse_content_block_delta() {
         let line = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#;
-        match parse_stream_line(line) {
-            Some(ClaudeEvent::TextDelta(t)) => assert_eq!(&*t, "hello"),
+        let events = parse_stream_line(line);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ClaudeEvent::TextDelta(t) => assert_eq!(&**t, "hello"),
             other => panic!("unexpected: {other:?}"),
         }
     }

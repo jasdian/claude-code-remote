@@ -278,6 +278,7 @@ fn is_affirmative(text: &str) -> bool {
 }
 
 /// Delete old session row and start a fresh session in the same thread.
+/// Cleans up any orphaned worktree from the previous session first.
 async fn start_new_in_thread(
     ctx: &serenity::Context,
     msg: &serenity::Message,
@@ -286,6 +287,13 @@ async fn start_new_in_thread(
     user_id: UserId,
     prompt: &str,
 ) -> Result<(), AppError> {
+    // Clean up old worktree before deleting session row (prevents orphan on disk)
+    if let Ok(Some(old_session)) = crate::db::get_any_session_by_thread(&state.db, thread_id).await
+        && let Some(ref wt_path_str) = old_session.worktree_path
+    {
+        crate::claude::worktree::remove_worktree(std::path::Path::new(wt_path_str.as_ref()), false)
+            .await;
+    }
     crate::db::delete_session_by_thread(&state.db, thread_id).await?;
 
     let cwd = state.config.claude.resolve_cwd(None).await?;
@@ -361,6 +369,7 @@ async fn start_claude(
     };
 
     let (tx, rx) = crate::claude::process::event_channel();
+    let (stdin_tx, stdin_rx) = crate::claude::process::stdin_channel();
     let cancel = state.shutdown.child_token();
 
     let handle = crate::claude::process::run_claude(
@@ -372,6 +381,7 @@ async fn start_claude(
         combined_prompt.as_deref(),
         tx,
         cancel,
+        stdin_rx,
     )
     .await?;
 
@@ -384,7 +394,7 @@ async fn start_claude(
 
     state
         .session_manager
-        .register(thread_id, handle, cwd, worktree_path)?;
+        .register(thread_id, handle, stdin_tx, cwd, worktree_path)?;
     crate::db::touch_session(&state.db, thread_id).await?;
 
     let stream_cancel = state.shutdown.child_token();

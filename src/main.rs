@@ -48,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Clean up orphaned worktrees from previous crash/shutdown
-    claude_crew::claude::worktree::cleanup_orphaned(&pool).await;
+    claude_crew::claude::worktree::cleanup_orphaned(&pool, &config.claude).await;
 
     // Build shared state
     let config = Arc::new(config);

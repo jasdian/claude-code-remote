@@ -119,6 +119,7 @@ pub async fn stream_to_discord(
         let tools = config.resolve_tools(Some(&session.project));
 
         let (tx, new_rx) = crate::claude::process::event_channel();
+        let (stdin_tx, stdin_rx) = crate::claude::process::stdin_channel();
         let process_cancel = state.shutdown.child_token();
 
         // Rebuild co-author prompt for queued follow-ups (belt-and-suspenders with git hook)
@@ -143,6 +144,7 @@ pub async fn stream_to_discord(
             system_prompt_override.as_deref(),
             tx,
             process_cancel,
+            stdin_rx,
         )
         .await;
 
@@ -157,9 +159,10 @@ pub async fn stream_to_discord(
             break;
         };
 
-        if let Err(e) = state
-            .session_manager
-            .register(thread_id, handle, cwd, worktree_path)
+        if let Err(e) =
+            state
+                .session_manager
+                .register(thread_id, handle, stdin_tx, cwd, worktree_path)
         {
             tracing::error!(?thread_id, error = %e, "failed to register session for queued messages");
             break;
@@ -239,10 +242,16 @@ async fn stream_events(
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error, output_preview }) => {
                         let status = if is_error { "failed" } else { "done" };
-                        // Update audit record with result (best-effort)
-                        // P2: find + retain for linear scan on small collection
-                        if let Some(pos) = latest_audit_id.iter().position(|(t, _)| t == &tool) {
-                            let (_, audit_id) = latest_audit_id.remove(pos);
+                        // Update audit record with result (best-effort).
+                        // tool_result blocks use tool_use_id (e.g. "toolu_abc") not tool name,
+                        // so match by name first, then fall back to oldest entry (FIFO order
+                        // is guaranteed by Claude's sequential/parallel tool execution).
+                        let audit_pos = latest_audit_id
+                            .iter()
+                            .position(|(t, _)| t == &tool)
+                            .or_else(|| if !latest_audit_id.is_empty() { Some(0) } else { None });
+                        if let Some(pos) = audit_pos {
+                            let (matched_tool, audit_id) = latest_audit_id.remove(pos);
                             let duration_ms = tool_timers
                                 .iter()
                                 .position(|(id, _)| *id == audit_id)
@@ -250,6 +259,10 @@ async fn stream_events(
                             let _ = crate::db::update_tool_result(
                                 &state.db, audit_id, is_error, &output_preview, duration_ms,
                             ).await;
+                            // Use matched tool name for display (not tool_use_id)
+                            send_message(http, channel_id,
+                                &format!("_{} {status}_", &*matched_tool)).await;
+                            continue;
                         }
                         send_message(http, channel_id,
                             &format!("_{} {status}_", &*tool)).await;
@@ -288,7 +301,26 @@ async fn stream_events(
                         } else {
                             format!("{mention} **Permission required ({}):** {}", &*cr.tool_name, &*cr.question)
                         };
+
+                        // Register reply waiter before sending the message
+                        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<String>();
+                        state.session_manager.set_reply_waiter(thread_id, reply_tx);
+                        let stdin_tx = state.session_manager.get_stdin_tx(thread_id);
+
                         send_message(http, channel_id, &display).await;
+
+                        // Spawn forwarding task to route user reply to stdin
+                        if let Some(stdin_tx) = stdin_tx {
+                            let request_id = Arc::clone(&cr.request_id);
+                            let tool_name = Arc::clone(&cr.tool_name);
+                            tokio::spawn(async move {
+                                if let Ok(_user_reply) = reply_rx.await {
+                                    let response = build_control_response(&request_id, &tool_name);
+                                    tracing::info!(%request_id, %tool_name, "forwarding control_response");
+                                    let _ = stdin_tx.send(response).await;
+                                }
+                            });
+                        }
                     }
                     Some(ClaudeEvent::SessionId(sid)) => {
                         state.session_manager.set_session_id(thread_id, sid.clone());
@@ -384,6 +416,22 @@ fn find_split_point(text: &str, max: usize) -> usize {
         .or_else(|| search_range.rfind('\n'))
         .or_else(|| search_range.rfind(' '))
         .unwrap_or(max.min(text.len()))
+}
+
+/// Build a control_response JSON for Claude's stdin.
+/// All control_requests use can_use_tool subtype — response is always allow/deny.
+fn build_control_response(request_id: &str, _tool_name: &str) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "allow",
+            }
+        }
+    })
+    .to_string()
 }
 
 async fn send_message(http: &serenity::Http, channel_id: serenity::ChannelId, content: &str) {

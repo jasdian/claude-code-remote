@@ -6,13 +6,14 @@ use crate::domain::{ClaudeSessionId, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 use dashmap::DashMap;
 use smallvec::SmallVec;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
 
 use super::process::ClaudeProcessHandle;
 
 struct ActiveSession {
     handle: ClaudeProcessHandle,
+    stdin_tx: mpsc::Sender<String>,
     started_at: Instant,
     claude_session_id: Option<ClaudeSessionId>,
     project_cwd: PathBuf,
@@ -57,6 +58,7 @@ impl SessionManager {
         &self,
         thread_id: ThreadId,
         handle: ClaudeProcessHandle,
+        stdin_tx: mpsc::Sender<String>,
         cwd: PathBuf,
         worktree_path: Option<PathBuf>,
     ) -> Result<(), AppError> {
@@ -70,6 +72,7 @@ impl SessionManager {
             thread_id,
             ActiveSession {
                 handle,
+                stdin_tx,
                 started_at: Instant::now(),
                 claude_session_id: None,
                 project_cwd: cwd,
@@ -77,6 +80,10 @@ impl SessionManager {
             },
         );
         Ok(())
+    }
+
+    pub fn get_stdin_tx(&self, thread_id: ThreadId) -> Option<mpsc::Sender<String>> {
+        self.active.get(&thread_id).map(|e| e.stdin_tx.clone())
     }
 
     pub fn set_session_id(&self, thread_id: ThreadId, sid: ClaudeSessionId) {
@@ -97,6 +104,7 @@ impl SessionManager {
     }
 
     pub fn remove(&self, thread_id: ThreadId) -> Option<(ClaudeProcessHandle, Option<PathBuf>)> {
+        self.reply_waiters.remove(&thread_id);
         self.active
             .remove(&thread_id)
             .map(|(_, s)| (s.handle, s.worktree_path))
@@ -176,13 +184,14 @@ impl SessionManager {
     }
 
     /// Kill all active sessions. Used during graceful shutdown.
+    /// Preserves worktree branches (keep_branch: true) so unpushed work isn't lost.
     pub async fn kill_all(&self) {
         let keys: SmallVec<[ThreadId; 4]> = self.active.iter().map(|e| *e.key()).collect();
         for tid in keys {
             if let Some((_, session)) = self.active.remove(&tid) {
                 let _ = session.handle.kill().await;
                 if let Some(ref wt) = session.worktree_path {
-                    super::worktree::remove_worktree(wt, false).await;
+                    super::worktree::remove_worktree(wt, true).await;
                 }
                 tracing::info!(?tid, "killed session on shutdown");
             }

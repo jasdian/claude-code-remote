@@ -84,11 +84,13 @@ pub async fn claude(
             .await?;
 
     let (tx, rx) = crate::claude::process::event_channel();
+    let (stdin_tx, stdin_rx) = crate::claude::process::stdin_channel();
     let cancel = state.shutdown.child_token();
 
-    let handle =
-        crate::claude::process::run_claude(config, &prompt, None, &cwd, &tools, None, tx, cancel)
-            .await?;
+    let handle = crate::claude::process::run_claude(
+        config, &prompt, None, &cwd, &tools, None, tx, cancel, stdin_rx,
+    )
+    .await?;
 
     // DB write first — borrows worktree_path; register() moves it after.
     let user_id = UserId::from(ctx.author().id);
@@ -111,7 +113,7 @@ pub async fn claude(
 
     state
         .session_manager
-        .register(thread_id, handle, cwd, worktree_path)?;
+        .register(thread_id, handle, stdin_tx, cwd, worktree_path)?;
 
     let stream_cancel = state.shutdown.child_token();
     tokio::spawn(super::formatter::stream_to_discord(
@@ -375,10 +377,11 @@ async fn send_session_command(
     let tools = config.resolve_tools(Some(&session.project));
 
     let (tx, rx) = crate::claude::process::event_channel();
+    let (stdin_tx, stdin_rx) = crate::claude::process::stdin_channel();
     let cancel = state.shutdown.child_token();
 
     let handle = crate::claude::process::run_claude(
-        config, cli_cmd, resume_id, &cwd, &tools, None, tx, cancel,
+        config, cli_cmd, resume_id, &cwd, &tools, None, tx, cancel, stdin_rx,
     )
     .await?;
 
@@ -391,7 +394,7 @@ async fn send_session_command(
 
     state
         .session_manager
-        .register(thread_id, handle, cwd, worktree_path)?;
+        .register(thread_id, handle, stdin_tx, cwd, worktree_path)?;
     crate::db::touch_session(&state.db, thread_id).await?;
 
     ctx.say(status_msg).await?;
