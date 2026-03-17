@@ -273,7 +273,7 @@ pub async fn audit(
     ctx.defer_ephemeral().await?;
     check_admin(&ctx)?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
-    let n = count.unwrap_or(1).max(1);
+    let n = count.unwrap_or(1).clamp(1, 50);
     let rows = crate::db::get_tool_uses(&ctx.data().db, thread_id, id, n).await?;
     if rows.is_empty() {
         ctx.say("No tool uses found.").await?;
@@ -289,9 +289,12 @@ pub async fn audit(
         }
         // Chunk if over Discord limit
         if out.len() > 2000 {
-            for chunk in out.as_bytes().chunks(1990) {
-                let s = String::from_utf8_lossy(chunk);
-                ctx.channel_id().say(ctx.http(), &*s).await?;
+            let mut rest = out.as_str();
+            while !rest.is_empty() {
+                let end = if rest.len() <= 1990 { rest.len() } else { rest.floor_char_boundary(1990) };
+                let (chunk, tail) = rest.split_at(end);
+                rest = tail;
+                ctx.channel_id().say(ctx.http(), chunk).await?;
             }
         } else {
             ctx.say(out).await?;
@@ -322,6 +325,10 @@ fn thread_name(project: &str, prompt: &str) -> String {
 
     // "project — prompt excerpt"
     let prefix = format!("{project} — ");
+    if prefix.len() >= MAX {
+        let end = project.floor_char_boundary(MAX - ELLIPSIS.len());
+        return format!("{}{ELLIPSIS}", &project[..end]);
+    }
     let budget = MAX - prefix.len();
 
     // Take first line only
@@ -330,9 +337,8 @@ fn thread_name(project: &str, prompt: &str) -> String {
     if first_line.len() <= budget {
         format!("{prefix}{first_line}")
     } else {
-        let trunc = budget - ELLIPSIS.len();
+        let trunc = budget.saturating_sub(ELLIPSIS.len());
         let end = first_line.floor_char_boundary(trunc);
-        // Try to break at last space for clean word boundary
         let end = first_line[..end]
             .rfind(' ')
             .unwrap_or(end);

@@ -62,6 +62,9 @@ pub async fn stream_to_discord(
         let combined = messages.join("\n\n");
         tracing::info!(?thread_id, count = messages.len(), "processing queued messages");
 
+        // Notify the user that a queued message is being picked up
+        send_message(&http, channel_id, &format!("📨 _Queued ({} msg)_", messages.len())).await;
+
         // Get session info for resume
         let session = crate::db::get_session_by_thread(&state.db, thread_id).await;
         let Ok(Some(session)) = session else {
@@ -236,9 +239,7 @@ fn take_chunk(buffer: &mut String, in_code_fence: bool) -> String {
 }
 
 fn take_all(buffer: &mut String) -> String {
-    let chunk = buffer.clone();
-    buffer.clear();
-    chunk
+    std::mem::take(buffer)
 }
 
 #[inline]
@@ -259,9 +260,16 @@ async fn send_message(http: &serenity::Http, channel_id: serenity::ChannelId, co
     }
 
     if content.len() > 2000 {
-        for chunk in content.as_bytes().chunks(1990) {
-            let s = String::from_utf8_lossy(chunk);
-            if let Err(e) = channel_id.say(http, &*s).await {
+        let mut rest = content;
+        while !rest.is_empty() {
+            let end = if rest.len() <= 1990 {
+                rest.len()
+            } else {
+                rest.floor_char_boundary(1990)
+            };
+            let (chunk, tail) = rest.split_at(end);
+            rest = tail;
+            if let Err(e) = channel_id.say(http, chunk).await {
                 tracing::error!(channel = channel_id.get(), error = %e, "discord send failed");
             }
         }
