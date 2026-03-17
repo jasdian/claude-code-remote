@@ -36,64 +36,74 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 /// ISO 8601 UTC timestamp expression for SQLite.
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
-/// Schema version tracked via SQLite user_version pragma.
-const SCHEMA_VERSION: i32 = 2;
+async fn current_version(pool: &SqlitePool) -> Result<i32, AppError> {
+    let version: i32 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(pool)
+        .await?;
+    Ok(version)
+}
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            thread_id INTEGER NOT NULL UNIQUE,
-            user_id INTEGER NOT NULL,
-            claude_session_id TEXT,
-            project TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
-            last_active_at TEXT NOT NULL DEFAULT ({NOW_UTC})
-        )"
-    ))
-    .execute(pool)
-    .await?;
+    let version = current_version(pool).await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id)")
+    if version < 1 {
+        // v0 -> v1: full schema
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                thread_id INTEGER NOT NULL UNIQUE,
+                user_id INTEGER NOT NULL,
+                claude_session_id TEXT,
+                project TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                last_active_at TEXT NOT NULL DEFAULT ({NOW_UTC})
+            )"
+        ))
         .execute(pool)
         .await?;
 
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_thread ON sessions(thread_id)")
+            .execute(pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status)")
+            .execute(pool)
+            .await?;
+
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS access_requests (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_at TEXT NOT NULL DEFAULT ({NOW_UTC})
+            )"
+        ))
         .execute(pool)
         .await?;
 
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS access_requests (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            requested_at TEXT NOT NULL DEFAULT ({NOW_UTC})
-        )"
-    ))
-    .execute(pool)
-    .await?;
-
-    sqlx::query(&format!(
-        "CREATE TABLE IF NOT EXISTS tool_uses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            thread_id INTEGER NOT NULL,
-            tool TEXT NOT NULL,
-            input_preview TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
-            FOREIGN KEY (thread_id) REFERENCES sessions(thread_id)
-        )"
-    ))
-    .execute(pool)
-    .await?;
-
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tool_uses_thread ON tool_uses(thread_id)")
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS tool_uses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id INTEGER NOT NULL,
+                tool TEXT NOT NULL,
+                input_preview TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                FOREIGN KEY (thread_id) REFERENCES sessions(thread_id)
+            )"
+        ))
         .execute(pool)
         .await?;
 
-    sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
-        .execute(pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_tool_uses_thread ON tool_uses(thread_id)")
+            .execute(pool)
+            .await?;
+
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(pool)
+            .await?;
+        tracing::info!("migration: v0 -> v1 (sessions, access_requests, tool_uses)");
+    }
 
     Ok(())
 }
