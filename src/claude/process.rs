@@ -29,6 +29,13 @@ impl ClaudeProcessHandle {
         Ok(())
     }
 
+    /// Signal the process to stop without taking ownership.
+    /// The reader task will see the cancellation and close the event channel.
+    /// The child process will be killed on drop via `kill_on_drop(true)`.
+    pub fn signal_stop(&self) {
+        self.cancel.cancel();
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
@@ -81,6 +88,13 @@ pub async fn run_claude(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
+    tracing::info!(
+        binary = config.binary.as_ref(),
+        ?cwd,
+        resume = session_id,
+        "spawning claude process",
+    );
+
     let mut child = cmd
         .spawn()
         .map_err(|e| AppError::claude(&format!("failed to spawn claude: {e}")))?;
@@ -127,7 +141,7 @@ pub async fn run_claude(
                 line_result = lines.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
-                            tracing::trace!(line, "claude stdout");
+                            tracing::debug!(line, "claude stdout");
                             if let Some(event) = super::parser::parse_stream_line(&line) {
                                 got_events = true;
                                 if event_tx.send(event).await.is_err() {

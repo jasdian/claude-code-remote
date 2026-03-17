@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use tokio::signal;
 use tokio_util::sync::CancellationToken;
 
 use claude_remote_chat::AppState;
@@ -58,7 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         tracing::info!(count = reaped.len(), "reaped expired sessions");
                         for tid in reaped {
                             let _ = claude_remote_chat::db::update_session_status(
-                                &reaper_state.db, tid, "expired",
+                                &reaper_state.db, tid, claude_remote_chat::domain::SessionStatus::Expired,
                             ).await;
                         }
                     }
@@ -67,25 +68,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Signal handler
-    let signal_shutdown = shutdown.clone();
-    tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to register SIGTERM handler");
-
-        tokio::select! {
-            _ = ctrl_c => tracing::info!("received SIGINT"),
-            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
-        }
-
-        tracing::info!("initiating graceful shutdown");
-        signal_shutdown.cancel();
-    });
-
-    // Start Discord bot
+    // Spawn Discord bot as a separate task (Tokio recommended pattern)
     tracing::info!("starting discord bot");
-    claude_remote_chat::discord::start_bot(state).await?;
+    let bot_handle = tokio::spawn(claude_remote_chat::discord::start_bot(state));
+
+    // Wait for shutdown signal in main task
+    let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
+        .expect("failed to register SIGTERM handler");
+
+    tokio::select! {
+        _ = signal::ctrl_c() => {
+            tracing::info!("received SIGINT");
+        }
+        _ = sigterm.recv() => {
+            tracing::info!("received SIGTERM");
+        }
+    }
+
+    // Signal all tasks to shut down
+    tracing::info!("initiating graceful shutdown");
+    shutdown.cancel();
+
+    // Wait for bot to finish with timeout
+    tokio::select! {
+        result = bot_handle => {
+            if let Err(e) = result {
+                tracing::error!(error = %e, "bot task panicked");
+            }
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            tracing::warn!("graceful shutdown timed out, forcing exit");
+            std::process::exit(0);
+        }
+    }
 
     tracing::info!("shutdown complete");
     Ok(())

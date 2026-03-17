@@ -1,11 +1,12 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use poise::serenity_prelude as serenity;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::domain::{ClaudeEvent, SessionStatus, ThreadId};
 use crate::AppState;
-use crate::domain::{ClaudeEvent, ThreadId};
 
 const BUFFER_INITIAL_CAPACITY: usize = 2048;
 const FLUSH_THRESHOLD: usize = 1800;
@@ -17,8 +18,6 @@ pub async fn stream_to_discord(
     state: Arc<AppState>,
     cancel: CancellationToken,
 ) {
-    let mut buffer = String::with_capacity(BUFFER_INITIAL_CAPACITY);
-    let mut in_code_fence = false;
     let thread_id = ThreadId::from(channel_id);
 
     // Typing indicator task
@@ -37,6 +36,103 @@ pub async fn stream_to_discord(
         }
     });
 
+    // Main stream loop — processes events, then checks for pending messages
+    loop {
+        let sent_any = stream_events(&http, channel_id, &mut rx, &state, &cancel, thread_id).await;
+
+        // Remove the active session handle (process is done)
+        state.session_manager.remove(thread_id);
+
+        // Check for pending messages before reporting "no response"
+        if cancel.is_cancelled() {
+            break;
+        }
+
+        let pending = state.session_manager.take_pending(thread_id);
+
+        if !sent_any && pending.is_none() {
+            tracing::warn!(?thread_id, "stream finished with no content sent to discord");
+            send_message(&http, channel_id, "_Claude produced no response._").await;
+        }
+
+        let Some(messages) = pending else {
+            break;
+        };
+
+        let combined = messages.join("\n\n");
+        tracing::info!(?thread_id, count = messages.len(), "processing queued messages");
+
+        // Get session info for resume
+        let session = crate::db::get_session_by_thread(&state.db, thread_id).await;
+        let Ok(Some(session)) = session else {
+            tracing::error!(?thread_id, "no session in db for pending messages");
+            break;
+        };
+
+        let config = &state.config.claude;
+        let resume_id = session.claude_session_id.as_ref().map(|s| s.as_str());
+        let cwd_result = config.resolve_cwd(Some(&session.project)).await;
+        let Ok(cwd_str) = cwd_result else {
+            // Fallback: try to get cwd from session manager
+            tracing::error!(?thread_id, "could not resolve cwd for pending messages");
+            break;
+        };
+        let cwd = Path::new(cwd_str.as_ref());
+        let tools = config.resolve_tools(Some(&session.project));
+
+        let (tx, new_rx) = crate::claude::process::event_channel();
+        let process_cancel = state.shutdown.child_token();
+
+        let handle = crate::claude::process::run_claude(
+            config,
+            &combined,
+            resume_id,
+            cwd,
+            &tools,
+            tx,
+            process_cancel,
+        )
+        .await;
+
+        let Ok(handle) = handle else {
+            tracing::error!(?thread_id, "failed to spawn claude for queued messages");
+            send_message(&http, channel_id, "**Error:** failed to start Claude for queued message.").await;
+            break;
+        };
+
+        if let Err(e) = state
+            .session_manager
+            .register(thread_id, handle, cwd.to_path_buf())
+        {
+            tracing::error!(?thread_id, error = %e, "failed to register session for queued messages");
+            break;
+        }
+
+        let _ = crate::db::touch_session(&state.db, thread_id).await;
+        rx = new_rx;
+    }
+
+    // Final cleanup
+    tracing::info!(?thread_id, "stream finished");
+    typing_cancel_trigger.cancel();
+    typing_task.abort();
+    state.session_manager.remove(thread_id);
+    let _ = crate::db::update_session_status(&state.db, thread_id, SessionStatus::Idle).await;
+}
+
+/// Stream events from a single Claude process invocation. Returns whether any content was sent.
+async fn stream_events(
+    http: &serenity::Http,
+    channel_id: serenity::ChannelId,
+    rx: &mut mpsc::Receiver<ClaudeEvent>,
+    state: &AppState,
+    cancel: &CancellationToken,
+    thread_id: ThreadId,
+) -> bool {
+    let mut buffer = String::with_capacity(BUFFER_INITIAL_CAPACITY);
+    let mut in_code_fence = false;
+    let mut sent_any = false;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -44,28 +140,30 @@ pub async fn stream_to_discord(
                 break;
             }
             event = rx.recv() => {
+                tracing::debug!(?thread_id, event = ?event.as_ref().map(std::mem::discriminant), "stream event");
                 match event {
                     Some(ClaudeEvent::TextDelta(text)) => {
+                        sent_any = true;
                         buffer.push_str(&text);
                         update_fence_state(&text, &mut in_code_fence);
 
                         if buffer.len() >= FLUSH_THRESHOLD {
                             let chunk = take_chunk(&mut buffer, in_code_fence);
-                            send_message(&http, channel_id, &chunk).await;
+                            send_message(http, channel_id, &chunk).await;
                         }
                     }
                     Some(ClaudeEvent::ToolUse { tool, .. }) => {
                         if !buffer.is_empty() {
                             let chunk = take_all(&mut buffer);
-                            send_message(&http, channel_id, &chunk).await;
+                            send_message(http, channel_id, &chunk).await;
                             in_code_fence = false;
                         }
-                        send_message(&http, channel_id,
+                        send_message(http, channel_id,
                             &format!("_Using {} ..._", &*tool)).await;
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error }) => {
                         let status = if is_error { "failed" } else { "done" };
-                        send_message(&http, channel_id,
+                        send_message(http, channel_id,
                             &format!("_{} {status}_", &*tool)).await;
                     }
                     Some(ClaudeEvent::SessionId(sid)) => {
@@ -75,7 +173,8 @@ pub async fn stream_to_discord(
                         ).await;
                     }
                     Some(ClaudeEvent::Error(e)) => {
-                        send_message(&http, channel_id,
+                        sent_any = true;
+                        send_message(http, channel_id,
                             &format!("**Error:** {e}")).await;
                         break;
                     }
@@ -87,14 +186,10 @@ pub async fn stream_to_discord(
 
     if !buffer.is_empty() {
         let chunk = take_all(&mut buffer);
-        send_message(&http, channel_id, &chunk).await;
+        send_message(http, channel_id, &chunk).await;
     }
 
-    // Cleanup
-    typing_cancel_trigger.cancel();
-    typing_task.abort();
-    state.session_manager.remove(thread_id);
-    let _ = crate::db::update_session_status(&state.db, thread_id, "idle").await;
+    sent_any
 }
 
 #[inline]
@@ -157,10 +252,12 @@ async fn send_message(http: &serenity::Http, channel_id: serenity::ChannelId, co
     if content.len() > 2000 {
         for chunk in content.as_bytes().chunks(1990) {
             let s = String::from_utf8_lossy(chunk);
-            let _ = channel_id.say(http, &*s).await;
+            if let Err(e) = channel_id.say(http, &*s).await {
+                tracing::error!(channel = channel_id.get(), error = %e, "discord send failed");
+            }
         }
-    } else {
-        let _ = channel_id.say(http, content).await;
+    } else if let Err(e) = channel_id.say(http, content).await {
+        tracing::error!(channel = channel_id.get(), error = %e, "discord send failed");
     }
 }
 

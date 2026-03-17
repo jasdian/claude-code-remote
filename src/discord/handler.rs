@@ -68,13 +68,36 @@ pub async fn handle_message(
         }
 
         if state.session_manager.has_session(thread_id) {
-            msg.reply(ctx, "Claude is still processing. Please wait.")
-                .await?;
+            // Session is busy — check for interrupt or queue
+            let (is_interrupt, clean_prompt) = parse_interrupt(&prompt);
+
+            if is_interrupt {
+                tracing::info!(?thread_id, "interrupting session");
+                // Queue BEFORE interrupt to avoid race with stream_to_discord
+                state
+                    .session_manager
+                    .queue_message(thread_id, clean_prompt.to_string());
+                state.session_manager.interrupt(thread_id);
+                msg.react(ctx, serenity::ReactionType::Unicode("⏭️".into()))
+                    .await?;
+            } else {
+                state
+                    .session_manager
+                    .queue_message(thread_id, prompt.to_string());
+                msg.react(ctx, serenity::ReactionType::Unicode("📨".into()))
+                    .await?;
+                tracing::info!(?thread_id, "message queued");
+            }
             return Ok(());
         }
 
         // Resume existing session
-        tracing::info!(?thread_id, "resuming session");
+        tracing::info!(
+            ?thread_id,
+            claude_session_id = session.claude_session_id.as_ref().map(|s| s.as_str()),
+            project = %session.project,
+            "resuming session",
+        );
         return start_claude(
             ctx,
             msg,
@@ -91,11 +114,23 @@ pub async fn handle_message(
     if is_dm(msg) && is_authorized(state, msg.author.id.get()) {
         tracing::info!(user = msg.author.name, "new DM session");
 
-        crate::db::create_session(&state.db, thread_id, user_id, "default").await?;
+        let cwd = state.config.claude.resolve_cwd(None).await?;
+        let project_name = crate::project_name_from_cwd(Path::new(cwd.as_ref()));
+        crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
         return start_claude(ctx, msg, state, thread_id, &prompt, None, None).await;
     }
 
     Ok(())
+}
+
+/// Check if message is an interrupt request. `!` prefix interrupts current and sends the rest.
+#[inline]
+fn parse_interrupt(prompt: &str) -> (bool, &str) {
+    if let Some(rest) = prompt.strip_prefix('!') {
+        (true, rest.trim())
+    } else {
+        (false, prompt)
+    }
 }
 
 async fn start_claude(

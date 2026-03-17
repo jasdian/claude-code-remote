@@ -93,15 +93,25 @@ impl SessionStatus {
             Self::Expired => "expired",
         }
     }
+}
 
+impl From<&str> for SessionStatus {
     #[inline]
-    pub fn parse(s: &str) -> Self {
+    fn from(s: &str) -> Self {
         match s {
             "active" => Self::Active,
             "idle" => Self::Idle,
             "stopped" => Self::Stopped,
+            "expired" => Self::Expired,
             _ => Self::Expired,
         }
+    }
+}
+
+impl AsRef<str> for SessionStatus {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        self.as_str()
     }
 }
 

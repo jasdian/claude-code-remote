@@ -4,7 +4,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 
 use crate::Context;
-use crate::domain::{ThreadId, UserId};
+use crate::domain::{SessionStatus, ThreadId, UserId};
 use crate::error::AppError;
 
 #[inline]
@@ -82,7 +82,7 @@ pub async fn claude(
         .register(thread_id, handle, cwd.to_path_buf())?;
 
     let user_id = UserId::from(ctx.author().id);
-    let project_name = project.as_deref().unwrap_or("default");
+    let project_name = crate::project_name_from_cwd(cwd);
     crate::db::create_session(&state.db, thread_id, user_id, project_name).await?;
 
     let stream_cancel = state.shutdown.child_token();
@@ -98,25 +98,62 @@ pub async fn claude(
 }
 
 #[poise::command(slash_command)]
-pub async fn stop(ctx: Context<'_>) -> Result<(), AppError> {
+pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
     check_auth(&ctx).await?;
     let thread_id = ThreadId::from(ctx.channel_id());
 
-    if let Some(handle) = ctx.data().session_manager.remove(thread_id) {
+    let had_session = if let Some(handle) = ctx.data().session_manager.remove(thread_id) {
         handle.kill().await?;
-        crate::db::update_session_status(&ctx.data().db, thread_id, "stopped").await?;
-        ctx.say("Session stopped.").await?;
+        crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
+        true
     } else if crate::db::get_session_by_thread(&ctx.data().db, thread_id)
         .await?
         .is_some()
     {
-        crate::db::update_session_status(&ctx.data().db, thread_id, "stopped").await?;
-        ctx.say("Session stopped (process already finished).")
-            .await?;
+        crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
+        true
     } else {
-        ctx.say("No session in this thread.").await?;
+        false
+    };
+
+    if had_session {
+        ctx.say("Session ended.").await?;
+        // Archive the thread (not in DMs)
+        if ctx.guild_id().is_some() {
+            let channel = ctx.channel_id();
+            let _ = channel
+                .edit_thread(ctx.http(), serenity::EditThread::new().archived(true))
+                .await;
+        }
+    } else {
+        ctx.say("No session here.").await?;
     }
+    Ok(())
+}
+
+#[poise::command(slash_command)]
+pub async fn interrupt(
+    ctx: Context<'_>,
+    #[description = "New prompt to send after interrupting"] prompt: Option<String>,
+) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_auth(&ctx).await?;
+    let thread_id = ThreadId::from(ctx.channel_id());
+
+    if !ctx.data().session_manager.has_session(thread_id) {
+        ctx.say("Nothing to interrupt.").await?;
+        return Ok(());
+    }
+
+    if let Some(msg) = prompt {
+        ctx.data()
+            .session_manager
+            .queue_message(thread_id, msg);
+    }
+
+    ctx.data().session_manager.interrupt(thread_id);
+    ctx.say("Interrupted.").await?;
     Ok(())
 }
 
