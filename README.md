@@ -76,6 +76,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Optional `--dangerously-skip-permissions` for trusted environments
 - **Git worktree isolation** -- optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
 - **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a GitHub PR via `gh` CLI if there are commits ahead of the default branch
+- **Co-authored commits** -- map Discord users to GitHub usernames/emails via config; collaborative sessions automatically add `Co-authored-by` trailers to every commit via a `prepare-commit-msg` git hook (worktree sessions) plus system prompt hints (all sessions)
 - Session timeout and automatic cleanup
 - stderr capture -- Claude process errors are logged and surfaced to Discord
 
@@ -200,6 +201,10 @@ cwd = "/home/you/projects/myapp"
 admins = [123456789012345678]                        # Can /approve, /revoke, /pending
 allowed_users = [123456789012345678]                  # Always authorized (config-managed)
 allowed_roles = []                                   # Always authorized (by role)
+
+[auth.user_identities.123456789012345678]            # Map Discord ID -> Git identity
+github_username = "octocat"                           # For Co-authored-by trailers
+# email = "octocat@example.com"                      # Preferred over github noreply
 
 [database]
 url = "sqlite:data.db?mode=rwc"                      # SQLite DB path
@@ -431,7 +436,6 @@ Potential future features:
 - **File attachment support** -- Send files/images via Discord attachments for Claude to read
 - **Reaction-based approval UI** -- Discord button components instead of text replies for permission prompts and user questions; collaborative sessions could require quorum approval
 - **`/health` endpoint** -- HTTP health check for monitoring (lightweight Axum or Hyper)
-- **Co-authored commits** -- Map Discord users to GitHub usernames/emails so commits from collaborative sessions include `Co-Authored-By` trailers for all participants
 - **PR review integration** -- Post PR review comments from Discord; let participants approve/request changes via slash commands
 - **Session handoff** -- Transfer session ownership to another participant without ending it
 

@@ -100,9 +100,7 @@ pub async fn remove_worktree(worktree_path: &Path, keep_branch: bool) {
 
     remove_worktree_impl(repo_root, worktree_path).await;
 
-    if !keep_branch
-        && let Some(tid_str) = worktree_path.file_name().and_then(|n| n.to_str())
-    {
+    if !keep_branch && let Some(tid_str) = worktree_path.file_name().and_then(|n| n.to_str()) {
         let branch = format!("{BRANCH_PREFIX}{tid_str}");
         let _ = Command::new("git")
             .args(["branch", "-D", &branch])
@@ -210,11 +208,7 @@ pub async fn try_create_pr(worktree_path: &Path, project: &str) -> Option<String
 
     // Gather commit log for PR body
     let log_output = Command::new("git")
-        .args([
-            "log",
-            "--oneline",
-            &format!("{default_branch}..HEAD"),
-        ])
+        .args(["log", "--oneline", &format!("{default_branch}..HEAD")])
         .current_dir(worktree_path)
         .output()
         .await
@@ -224,7 +218,10 @@ pub async fn try_create_pr(worktree_path: &Path, project: &str) -> Option<String
     // Use first commit subject as PR title
     let first_subject = commits.lines().last().unwrap_or("Claude session changes");
     let title = if count == 1 {
-        first_subject.split_once(' ').map_or(first_subject, |(_, msg)| msg).to_string()
+        first_subject
+            .split_once(' ')
+            .map_or(first_subject, |(_, msg)| msg)
+            .to_string()
     } else {
         format!("{project}: {count} changes from session {tid_str}")
     };
@@ -251,11 +248,16 @@ pub async fn try_create_pr(worktree_path: &Path, project: &str) -> Option<String
 
     let pr = Command::new("gh")
         .args([
-            "pr", "create",
-            "--head", &branch,
-            "--base", &default_branch,
-            "--title", &title,
-            "--body", &body,
+            "pr",
+            "create",
+            "--head",
+            &branch,
+            "--base",
+            &default_branch,
+            "--title",
+            &title,
+            "--body",
+            &body,
         ])
         .current_dir(repo_root)
         .output()
@@ -321,6 +323,133 @@ pub async fn resolve_session_cwd(
             Ok((base_cwd, None))
         }
     }
+}
+
+/// Install the `prepare-commit-msg` hook in a worktree for co-author trailers.
+/// P4: All IO via tokio.
+async fn install_coauthor_hook(worktree_path: &Path) -> Result<(), AppError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| AppError::claude(&format!("git rev-parse --git-dir: {e}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::claude(
+            "could not determine git dir for hook installation",
+        ));
+    }
+
+    let git_dir_raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let git_dir = if Path::new(&git_dir_raw).is_absolute() {
+        PathBuf::from(&git_dir_raw)
+    } else {
+        worktree_path.join(&git_dir_raw)
+    };
+
+    let hooks_dir = git_dir.join("hooks");
+    tokio::fs::create_dir_all(&hooks_dir)
+        .await
+        .map_err(|e| AppError::claude(&format!("creating hooks dir: {e}")))?;
+
+    let hook_path = hooks_dir.join("prepare-commit-msg");
+    tokio::fs::write(&hook_path, crate::domain::PREPARE_COMMIT_MSG_HOOK)
+        .await
+        .map_err(|e| AppError::claude(&format!("writing hook: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&hook_path, perms)
+            .await
+            .map_err(|e| AppError::claude(&format!("chmod hook: {e}")))?;
+    }
+
+    tracing::debug!(?hook_path, "installed prepare-commit-msg hook");
+    Ok(())
+}
+
+/// Write (or remove) the `.claude-coauthors` file in a worktree.
+/// P4: async IO only.
+pub async fn write_coauthors_file(
+    worktree_path: &Path,
+    content: Option<&str>,
+) -> Result<(), AppError> {
+    let file_path = worktree_path.join(".claude-coauthors");
+
+    match content {
+        Some(text) => {
+            tokio::fs::write(&file_path, text)
+                .await
+                .map_err(|e| AppError::claude(&format!("writing .claude-coauthors: {e}")))?;
+            tracing::debug!(?file_path, "wrote coauthors file");
+        }
+        None => {
+            if tokio::fs::metadata(&file_path).await.is_ok() {
+                let _ = tokio::fs::remove_file(&file_path).await;
+                tracing::debug!(?file_path, "removed coauthors file (solo session)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Exclude `.claude-coauthors` via the worktree's git exclude file.
+/// Uses `info/exclude` rather than `.gitignore` to avoid modifying tracked files.
+async fn ensure_coauthors_excluded(worktree_path: &Path) {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(worktree_path)
+        .output()
+        .await;
+
+    let git_dir = match output {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if Path::new(&s).is_absolute() {
+                PathBuf::from(s)
+            } else {
+                worktree_path.join(s)
+            }
+        }
+        _ => return,
+    };
+
+    let info_dir = git_dir.join("info");
+    let exclude_path = info_dir.join("exclude");
+    let entry = ".claude-coauthors";
+
+    let existing = tokio::fs::read_to_string(&exclude_path)
+        .await
+        .unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == entry) {
+        return;
+    }
+
+    let new_content = if existing.is_empty() || existing.ends_with('\n') {
+        format!("{existing}{entry}\n")
+    } else {
+        format!("{existing}\n{entry}\n")
+    };
+
+    let _ = tokio::fs::create_dir_all(&info_dir).await;
+    if let Err(e) = tokio::fs::write(&exclude_path, new_content).await {
+        tracing::warn!(error = %e, "failed to update git exclude for coauthors file");
+    }
+}
+
+/// Set up co-author hook and initial coauthors file for a worktree.
+/// Best-effort: logs warnings but does not fail the session.
+pub async fn setup_coauthor_hook(worktree_path: &Path, coauthors_content: Option<&str>) {
+    if let Err(e) = install_coauthor_hook(worktree_path).await {
+        tracing::warn!(error = %e, "failed to install co-author hook");
+    }
+    if let Err(e) = write_coauthors_file(worktree_path, coauthors_content).await {
+        tracing::warn!(error = %e, "failed to write coauthors file");
+    }
+    ensure_coauthors_excluded(worktree_path).await;
 }
 
 /// Clean up orphaned worktrees from stopped/expired sessions on startup.

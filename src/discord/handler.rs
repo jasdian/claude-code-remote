@@ -108,6 +108,21 @@ pub async fn handle_message(
                     user = msg.author.name,
                     "user auto-joined session"
                 );
+                // Update .claude-coauthors file if worktree exists
+                if let Some(ref wt_path_str) = session.worktree_path
+                    && let Ok(participants) =
+                        crate::db::get_participants(&state.db, thread_id).await
+                {
+                    let content = domain::build_coauthors_file_content(
+                        &participants,
+                        &state.config.auth.user_identities,
+                    );
+                    let _ = crate::claude::worktree::write_coauthors_file(
+                        std::path::Path::new(wt_path_str.as_ref()),
+                        content.as_deref(),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -318,16 +333,25 @@ async fn start_claude(
             .await?;
     let tools = config.resolve_tools(project);
 
-    // Build combined system prompt: config base + co-author trailers for multi-user sessions
-    let coauthor_block = match crate::db::get_participants(&state.db, thread_id).await {
-        Ok(participants) => {
-            domain::build_coauthor_prompt(&participants, &state.config.auth.user_identities)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to fetch participants for co-author prompt");
-            None
-        }
-    };
+    // P2: map_err + ok() to log and discard error in one chain
+    let participants = crate::db::get_participants(&state.db, thread_id)
+        .await
+        .map_err(
+            |e| tracing::warn!(error = %e, "failed to fetch participants for co-author prompt"),
+        )
+        .ok();
+
+    let coauthor_block = participants
+        .as_ref()
+        .and_then(|p| domain::build_coauthor_prompt(p, &state.config.auth.user_identities));
+
+    // Install git hook + write .claude-coauthors file if worktree is present
+    if let Some(ref wt) = worktree_path {
+        let coauthors_content = participants.as_ref().and_then(|p| {
+            domain::build_coauthors_file_content(p, &state.config.auth.user_identities)
+        });
+        crate::claude::worktree::setup_coauthor_hook(wt, coauthors_content.as_deref()).await;
+    }
 
     let combined_prompt = match (&config.system_prompt, &coauthor_block) {
         (Some(base), Some(coauthor)) => Some(format!("{base}\n\n{coauthor}")),

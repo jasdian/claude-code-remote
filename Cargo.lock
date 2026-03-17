@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "claude-crew"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "dashmap 6.1.0",

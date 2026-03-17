@@ -121,13 +121,26 @@ pub async fn stream_to_discord(
         let (tx, new_rx) = crate::claude::process::event_channel();
         let process_cancel = state.shutdown.child_token();
 
+        // Rebuild co-author prompt for queued follow-ups (belt-and-suspenders with git hook)
+        let coauthor_block = crate::db::get_participants(&state.db, thread_id)
+            .await
+            .ok()
+            .and_then(|p| {
+                crate::domain::build_coauthor_prompt(&p, &state.config.auth.user_identities)
+            });
+        let system_prompt_override = match (&config.system_prompt, &coauthor_block) {
+            (Some(base), Some(coauthor)) => Some(format!("{base}\n\n{coauthor}")),
+            (None, Some(coauthor)) => Some(coauthor.clone()),
+            _ => None,
+        };
+
         let handle = crate::claude::process::run_claude(
             config,
             &combined,
             resume_id,
             &cwd,
             &tools,
-            None, // queued follow-ups don't rebuild co-author prompt
+            system_prompt_override.as_deref(),
             tx,
             process_cancel,
         )
