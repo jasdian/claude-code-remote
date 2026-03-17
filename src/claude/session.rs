@@ -109,6 +109,17 @@ impl SessionManager {
         }
     }
 
+    /// Kill all active sessions. Used during graceful shutdown.
+    pub async fn kill_all(&self) {
+        let keys: SmallVec<[ThreadId; 4]> = self.active.iter().map(|e| *e.key()).collect();
+        for tid in keys {
+            if let Some((_, session)) = self.active.remove(&tid) {
+                let _ = session.handle.kill().await;
+                tracing::info!(?tid, "killed session on shutdown");
+            }
+        }
+    }
+
     /// Kill sessions older than timeout. Returns reaped thread IDs for DB cleanup.
     pub async fn reap_expired(&self) -> SmallVec<[ThreadId; 4]> {
         let timeout =

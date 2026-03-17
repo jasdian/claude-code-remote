@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn Discord bot as a separate task (Tokio recommended pattern)
     tracing::info!("starting discord bot");
-    let bot_handle = tokio::spawn(claude_remote_chat::discord::start_bot(state));
+    let bot_handle = tokio::spawn(claude_remote_chat::discord::start_bot(Arc::clone(&state)));
 
     // Wait for shutdown signal in main task
     let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())
@@ -88,6 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Signal all tasks to shut down
     tracing::info!("initiating graceful shutdown");
     shutdown.cancel();
+
+    // Kill all active Claude subprocesses
+    state.session_manager.kill_all().await;
 
     // Wait for bot to finish with timeout
     tokio::select! {
