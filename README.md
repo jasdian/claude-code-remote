@@ -136,11 +136,14 @@ Then:
 2. Under **OAuth2 URL Generator**:
    - Scopes: `bot`, `applications.commands`
    - Bot Permissions:
+     - View Channels
      - Send Messages
-     - Create Public Threads
      - Send Messages in Threads
-     - Use Slash Commands
+     - Create Public Threads
+     - Manage Threads *(archiving threads on `/end`)*
      - Read Message History
+     - Add Reactions *(emoji feedback on messages)*
+     - Use Slash Commands
 3. Copy the generated URL and open it in your browser
 4. Select your server and authorize
 
@@ -366,6 +369,7 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 
 | Problem | Fix |
 |---------|-----|
+| "Missing Access" on `/claude` | The bot needs **Create Public Threads** permission. Check both the bot role AND channel-level permission overrides -- if the channel denies thread creation for `@everyone`, the bot needs an explicit allow override on that channel |
 | "The application did not respond" on `/claude` | Ensure the bot has Send Messages permission |
 | Bot connects then disconnects with "Disallowed intents" | Enable **Message Content Intent** in Bot settings on the Developer Portal |
 | Slash commands don't appear | Wait 1-2 minutes after first bot startup for Discord to register them globally |

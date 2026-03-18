@@ -42,7 +42,7 @@ pub async fn claude(
     #[description = "Your prompt for Claude"] prompt: String,
     #[description = "Project name or path"] project: Option<String>,
 ) -> Result<(), AppError> {
-    ctx.defer().await?;
+    ctx.defer().await.map_err(|e| AppError::claude(&format!("defer: {e}")))?;
     check_auth(&ctx).await?;
 
     let state = ctx.data();
@@ -59,11 +59,11 @@ pub async fn claude(
 
     // In DMs: reply directly in channel. In guilds: create a thread.
     let response_channel = if is_dm {
-        ctx.say(&start_msg).await?;
+        ctx.say(&start_msg).await.map_err(|e| AppError::claude(&format!("say (DM): {e}")))?;
         ctx.channel_id()
     } else {
-        let reply = ctx.say(&start_msg).await?;
-        let msg = reply.message().await?;
+        let reply = ctx.say(&start_msg).await.map_err(|e| AppError::claude(&format!("say: {e}")))?;
+        let msg = reply.message().await.map_err(|e| AppError::claude(&format!("get message: {e}")))?;
         let thread = ctx
             .channel_id()
             .create_thread_from_message(
@@ -72,7 +72,8 @@ pub async fn claude(
                 serenity::CreateThread::new(thread_name(project_name, &prompt))
                     .auto_archive_duration(serenity::AutoArchiveDuration::OneDay),
             )
-            .await?;
+            .await
+            .map_err(|e| AppError::claude(&format!("create thread: {e}")))?;
         thread.id
     };
 
