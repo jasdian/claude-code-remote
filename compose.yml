@@ -4,10 +4,15 @@ services:
     container_name: claude-crew
     restart: unless-stopped
     environment:
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      # Option A: API key (console.anthropic.com)
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      # Option B: OAuth credentials are mounted from host below
     volumes:
       - db-data:/data
-      - claude-state:/home/appuser/.claude
+      # Mount host's Claude credentials (OAuth tokens from ~/.claude/.credentials.json)
+      # This lets the container reuse your existing `claude login` session.
+      # Supports: Pro/Max subscription OAuth, API keys via env var, or both.
+      - ${CLAUDE_CONFIG_DIR:-~/.claude}:/home/appuser/.claude:ro
       - ./config.prod.toml:/app/config.toml:ro
       # All cwd paths in config.prod.toml must be under /projects
       - ${PROJECTS_PATH:-/home/you/projects}:/projects
@@ -19,4 +24,3 @@ services:
 
 volumes:
   db-data:
-  claude-state:

@@ -2,9 +2,10 @@ target/
 .git/
 .claude/
 config.toml
+config.prod.toml
 data.db*
 shell.nix
 *.md
-src/
-Cargo.lock
-Cargo.toml
+*.log
+scripts/
+docs/
