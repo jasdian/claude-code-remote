@@ -170,11 +170,24 @@ pub async fn handle_message(
             return Ok(());
         }
 
-        // Resume existing session
+        // Resume existing session (or start fresh if previously stopped)
+        let is_stopped = session.status == SessionStatus::Stopped;
+        // If stopped, worktree/session were cleaned up by /end — start fresh
+        let resume_id = if is_stopped {
+            None
+        } else {
+            session.claude_session_id.as_ref().map(|s| s.as_str())
+        };
+        let worktree = if is_stopped {
+            None
+        } else {
+            session.worktree_path.as_deref()
+        };
         tracing::info!(
             ?thread_id,
-            claude_session_id = session.claude_session_id.as_ref().map(|s| s.as_str()),
+            claude_session_id = resume_id,
             project = %session.project,
+            is_stopped,
             "resuming session",
         );
         // Track current user for tool attribution
@@ -190,8 +203,8 @@ pub async fn handle_message(
             thread_id,
             &prompt,
             Some(&session.project),
-            session.claude_session_id.as_ref().map(|s| s.as_str()),
-            session.worktree_path.as_deref(),
+            resume_id,
+            worktree,
         )
         .await;
     }
@@ -233,12 +246,12 @@ pub async fn handle_message(
         return start_claude(ctx, msg, state, thread_id, &prompt, None, None, None).await;
     }
 
-    // Thread follow-up with no active/idle session — check if an expired/stopped session exists
+    // Thread follow-up with no active/idle/stopped session — check if an expired session exists
     if !is_dm(msg)
         && is_authorized(state, msg).await
         && let Some(old) = crate::db::get_any_session_by_thread(&state.db, thread_id).await?
         && old.owner_id == user_id
-        && matches!(old.status, SessionStatus::Stopped | SessionStatus::Expired)
+        && matches!(old.status, SessionStatus::Expired)
     {
         let status_label = old.status.as_str();
         let mention = format!("<@{}>", user_id.get());

@@ -207,6 +207,7 @@ async fn stream_events(
                 match event {
                     Some(ClaudeEvent::TextDelta(text)) => {
                         sent_any = true;
+                        let text = replace_command_name_tags(&text);
                         buffer.push_str(&text);
                         update_fence_state(&text, &mut in_code_fence);
 
@@ -231,11 +232,19 @@ async fn stream_events(
                                 // Remove previous entry for same tool, then push new
                                 latest_audit_id.retain(|(t, _)| t != &tool);
                                 latest_audit_id.push((Arc::clone(&tool), id));
-                                format!("_Using {} ..._ `#{id}`", &*tool)
+                                if input_preview.is_empty() {
+                                    format!("_Using {} ..._ `#{id}`", &*tool)
+                                } else {
+                                    format!("_Using {} — {} ..._ `#{id}`", &*tool, input_preview)
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(?thread_id, tool = &*tool, error = %e, "failed to log tool use");
-                                format!("_Using {} ..._", &*tool)
+                                if input_preview.is_empty() {
+                                    format!("_Using {} ..._", &*tool)
+                                } else {
+                                    format!("_Using {} — {} ..._", &*tool, input_preview)
+                                }
                             }
                         };
                         send_message(http, channel_id, &msg).await;
@@ -443,6 +452,30 @@ fn build_control_response(request_id: &str, _tool_name: &str) -> String {
     .to_string()
 }
 
+/// Replace `<command-name>foo</command-name>` tags with `_Running skill: foo_\n`.
+/// Returns a `Cow` to avoid allocation when no tags are present (P1).
+#[inline]
+fn replace_command_name_tags(text: &str) -> std::borrow::Cow<'_, str> {
+    const OPEN: &str = "<command-name>";
+    const CLOSE: &str = "</command-name>";
+
+    let Some(start) = text.find(OPEN) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let inner_start = start + OPEN.len();
+    let Some(end) = text[inner_start..].find(CLOSE) else {
+        return std::borrow::Cow::Borrowed(text);
+    };
+    let name = &text[inner_start..inner_start + end];
+    let tag_end = inner_start + end + CLOSE.len();
+
+    let mut result = String::with_capacity(text.len());
+    result.push_str(&text[..start]);
+    result.push_str(&format!("_Running skill: {name}_\n"));
+    result.push_str(&text[tag_end..]);
+    std::borrow::Cow::Owned(result)
+}
+
 async fn send_message(http: &serenity::Http, channel_id: serenity::ChannelId, content: &str) {
     if content.is_empty() {
         return;
@@ -507,5 +540,23 @@ mod tests {
         buf.push_str(&"x".repeat(1900));
         let _chunk = take_chunk(&mut buf, false);
         assert!(buf.capacity() >= BUFFER_INITIAL_CAPACITY);
+    }
+
+    #[test]
+    fn command_name_tag_replaced() {
+        let input = "some text <command-name>update-config</command-name> more text";
+        let result = replace_command_name_tags(input);
+        assert_eq!(
+            &*result,
+            "some text _Running skill: update-config_\n more text"
+        );
+    }
+
+    #[test]
+    fn command_name_tag_no_match() {
+        let input = "plain text without tags";
+        let result = replace_command_name_tags(input);
+        assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(&*result, input);
     }
 }

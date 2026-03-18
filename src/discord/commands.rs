@@ -42,7 +42,9 @@ pub async fn claude(
     #[description = "Your prompt for Claude"] prompt: String,
     #[description = "Project name or path"] project: Option<String>,
 ) -> Result<(), AppError> {
-    ctx.defer().await.map_err(|e| AppError::claude(&format!("defer: {e}")))?;
+    ctx.defer()
+        .await
+        .map_err(|e| AppError::claude(&format!("defer: {e}")))?;
     check_auth(&ctx).await?;
 
     let state = ctx.data();
@@ -59,11 +61,19 @@ pub async fn claude(
 
     // In DMs: reply directly in channel. In guilds: create a thread.
     let response_channel = if is_dm {
-        ctx.say(&start_msg).await.map_err(|e| AppError::claude(&format!("say (DM): {e}")))?;
+        ctx.say(&start_msg)
+            .await
+            .map_err(|e| AppError::claude(&format!("say (DM): {e}")))?;
         ctx.channel_id()
     } else {
-        let reply = ctx.say(&start_msg).await.map_err(|e| AppError::claude(&format!("say: {e}")))?;
-        let msg = reply.message().await.map_err(|e| AppError::claude(&format!("get message: {e}")))?;
+        let reply = ctx
+            .say(&start_msg)
+            .await
+            .map_err(|e| AppError::claude(&format!("say: {e}")))?;
+        let msg = reply
+            .message()
+            .await
+            .map_err(|e| AppError::claude(&format!("get message: {e}")))?;
         let thread = ctx
             .channel_id()
             .create_thread_from_message(
@@ -190,7 +200,8 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
             None => "Session ended.".to_string(),
         };
         ctx.say(&msg).await?;
-        // Archive the thread (not in DMs)
+        // Archive the thread (not in DMs). Users can still send messages
+        // which auto-unarchives the thread, allowing silent session resume.
         if ctx.guild_id().is_some() {
             let channel = ctx.channel_id();
             let _ = channel
@@ -474,10 +485,24 @@ pub async fn audit(
     } else {
         let mut out = String::new();
         for row in &rows {
-            let preview_str = if row.input_preview.is_empty() {
+            let input_str = if row.input_preview.is_empty() {
                 String::new()
             } else {
                 format!(" — `{}`", row.input_preview)
+            };
+            let result_str = if row.result_preview.is_empty() {
+                String::new()
+            } else {
+                // Truncate result preview for listing view
+                let preview = if row.result_preview.len() > 80 {
+                    format!(
+                        "{}…",
+                        &row.result_preview[..row.result_preview.floor_char_boundary(80)]
+                    )
+                } else {
+                    row.result_preview.clone()
+                };
+                format!(" → `{preview}`")
             };
             let error_marker = if row.is_error { " ❌" } else { "" };
             let duration_str = row
@@ -485,7 +510,7 @@ pub async fn audit(
                 .map(|ms| format!(" {ms}ms"))
                 .unwrap_or_default();
             out.push_str(&format!(
-                "`#{}` **{}**{preview_str}{error_marker}{duration_str} ({})\n",
+                "`#{}` **{}**{input_str}{result_str}{error_marker}{duration_str} ({})\n",
                 row.id, row.tool, row.created_at
             ));
         }
@@ -518,6 +543,10 @@ async fn audit_detail(ctx: &Context<'_>, id: i64) -> Result<(), AppError> {
         out.push_str("\n**Input:**\n```json\n");
         out.push_str(&d.input_json);
         out.push_str("\n```\n");
+    } else if !d.input_preview.is_empty() {
+        out.push_str("\n**Input:** `");
+        out.push_str(&d.input_preview);
+        out.push_str("`\n");
     }
 
     if !d.result_preview.is_empty() {

@@ -223,11 +223,12 @@ pub async fn get_session_by_thread(
     let row: Option<SessionRow> = sqlx::query_as(
         "SELECT id, thread_id, owner_id, claude_session_id, project, status,
                 created_at, last_active_at, worktree_path
-         FROM sessions WHERE thread_id = ? AND status IN (?, ?)",
+         FROM sessions WHERE thread_id = ? AND status IN (?, ?, ?)",
     )
     .bind(tid)
     .bind(SessionStatus::Active.as_str())
     .bind(SessionStatus::Idle.as_str())
+    .bind(SessionStatus::Stopped.as_str())
     .fetch_optional(pool)
     .await?;
 
@@ -507,6 +508,7 @@ pub struct ToolUseRow {
     pub id: i64,
     pub tool: String,
     pub input_preview: String,
+    pub result_preview: String,
     pub is_error: bool,
     pub duration_ms: Option<i64>,
     pub created_at: String,
@@ -518,6 +520,7 @@ impl<'r> FromRow<'r, SqliteRow> for ToolUseRow {
             id: row.try_get("id")?,
             tool: row.try_get("tool")?,
             input_preview: row.try_get("input_preview")?,
+            result_preview: row.try_get("result_preview")?,
             is_error: row.try_get::<i32, _>("is_error").map(|v| v != 0)?,
             duration_ms: row.try_get("duration_ms")?,
             created_at: row.try_get("created_at")?,
@@ -532,10 +535,10 @@ pub async fn get_tool_uses(
     count: i64,
 ) -> Result<Vec<ToolUseRow>, AppError> {
     let tid = thread_id.get() as i64;
-    let rows: Vec<ToolUseRow> = match at_id {
-        Some(id) => {
-            sqlx::query_as(
-                "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+    let rows: Vec<ToolUseRow> =
+        match at_id {
+            Some(id) => sqlx::query_as(
+                "SELECT id, tool, input_preview, result_preview, is_error, duration_ms, created_at
                  FROM tool_uses WHERE thread_id = ? AND id <= ?
                  ORDER BY id DESC LIMIT ?",
             )
@@ -543,20 +546,17 @@ pub async fn get_tool_uses(
             .bind(id)
             .bind(count)
             .fetch_all(pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as(
-                "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+            .await?,
+            None => sqlx::query_as(
+                "SELECT id, tool, input_preview, result_preview, is_error, duration_ms, created_at
                  FROM tool_uses WHERE thread_id = ?
                  ORDER BY id DESC LIMIT ?",
             )
             .bind(tid)
             .bind(count)
             .fetch_all(pool)
-            .await?
-        }
-    };
+            .await?,
+        };
     // Results come DESC, reverse to chronological order
     Ok(rows.into_iter().rev().collect())
 }
@@ -567,7 +567,7 @@ pub async fn get_tool_uses_global(
     count: i64,
 ) -> Result<Vec<ToolUseRow>, AppError> {
     let rows: Vec<ToolUseRow> = sqlx::query_as(
-        "SELECT id, tool, input_preview, is_error, duration_ms, created_at
+        "SELECT id, tool, input_preview, result_preview, is_error, duration_ms, created_at
          FROM tool_uses ORDER BY id DESC LIMIT ?",
     )
     .bind(count)

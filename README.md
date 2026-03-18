@@ -25,7 +25,7 @@ Claude Crew turns Claude Code into a **shared, real-time experience**. One perso
 ```
 Alice (laptop)  --+
                   |    Discord Thread     Claude Crew (Rust)             Claude Code CLI
-Bob   (phone)   --+--> #refactor-auth --> session manager          --> claude -p
+Bob   (phone)   --+--> #refactor-auth --> session manager          --> claude subprocess
 Carol (tablet)  --+                       (per-user attribution)       (your machine)
 ```
 
@@ -34,7 +34,7 @@ It also works great for **solo use** -- talk to Claude Code from your phone whil
 ## How It Works
 
 1. Alice uses `/claude refactor the auth module` in a server channel
-2. Bot spawns `claude -p` as a subprocess on your machine
+2. Bot spawns a `claude` subprocess on your machine (using `--input-format stream-json`)
 3. A Discord thread is created; Claude's response streams in real-time
 4. Bob opens the thread and types a follow-up -- he's **auto-joined** as a participant
 5. Carol uses `/join` to participate; `/participants` shows everyone in the session

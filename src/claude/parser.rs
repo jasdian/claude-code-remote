@@ -108,10 +108,7 @@ fn parse_system(v: &serde_json::Value) -> Option<ClaudeEvent> {
             .map(|sid| ClaudeEvent::SessionId(ClaudeSessionId::new(sid))),
         "api_retry" => {
             let attempt = v.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0);
-            let error = v
-                .get("error")
-                .and_then(|e| e.as_str())
-                .unwrap_or("unknown");
+            let error = v.get("error").and_then(|e| e.as_str()).unwrap_or("unknown");
             tracing::warn!(attempt, error, "claude API retry");
             None
         }

@@ -293,7 +293,12 @@ pub async fn run_claude(
                 }
             }
 
-            tracing::debug!(line_count, got_content, ?exit_code, "claude process finished");
+            tracing::debug!(
+                line_count,
+                got_content,
+                ?exit_code,
+                "claude process finished"
+            );
 
             // Fallback: if no content events were produced, send Error
             if !got_content && exit_code == Some(0) {
