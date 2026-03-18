@@ -4,46 +4,122 @@ use smallvec::SmallVec;
 
 use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData};
 
+/// Parsed output from a single stdout line.
+pub struct ParsedLine {
+    pub events: SmallVec<[ClaudeEvent; 2]>,
+    /// Result text from a "result" event — only present once per session.
+    /// Caller should emit as TextDelta only if no prior content was received
+    /// (to avoid duplicating text already sent via "assistant" events).
+    pub result_text: Option<Arc<str>>,
+}
+
 /// HOT PATH: called for every line of Claude stdout.
 ///
-/// Claude CLI stream-json format emits:
-///   {"type":"system", "session_id":"...", ...}         — init
-///   {"type":"assistant", "message":{"content":[...]}}  — full assistant turn
-///   {"type":"result", "result":"...", ...}              — final result
-///   {"type":"user", "message":{"content":[...]}}       — user turn: contains tool_result blocks
-///   {"type":"rate_limit_event", ...}                   — rate limit info (skip)
+/// Claude CLI stream-json format (with --verbose --include-partial-messages) emits:
+///   {"type":"system", "subtype":"init", "session_id":"...", ...}  — init
+///   {"type":"stream_event", "event":{...}}                        — streaming partial events
+///   {"type":"assistant", "message":{"content":[...]}}             — full assistant turn
+///   {"type":"result", "subtype":"success", "result":"...", ...}   — final result
+///   {"type":"user", "message":{"content":[...]}}                  — tool results
+///   {"type":"system", "subtype":"api_retry", ...}                 — API retry info
+///   {"type":"rate_limit_event", ...}                              — rate limit info (skip)
 #[inline]
-pub fn parse_stream_line(line: &str) -> SmallVec<[ClaudeEvent; 2]> {
+pub fn parse_stream_line(line: &str) -> ParsedLine {
+    let empty = ParsedLine {
+        events: SmallVec::new(),
+        result_text: None,
+    };
     let Some(v) = serde_json::from_str::<serde_json::Value>(line).ok() else {
-        return SmallVec::new();
+        return empty;
     };
     let Some(event_type) = v.get("type").and_then(|t| t.as_str()) else {
-        return SmallVec::new();
+        return empty;
     };
 
     match event_type {
-        "system" => parse_system(&v).into_iter().collect(),
-        "assistant" => parse_assistant(&v),
-        "result" => parse_result(&v).into_iter().collect(),
-        "user" => parse_user(&v),
-        "control_request" => parse_control_request(&v).into_iter().collect(),
-        // content_block_delta / content_block_start for API-style streaming (future)
-        "content_block_delta" => parse_content_delta(&v).into_iter().collect(),
-        "content_block_start" => parse_block_start(&v).into_iter().collect(),
+        "system" => ParsedLine {
+            events: parse_system(&v).into_iter().collect(),
+            result_text: None,
+        },
+        // stream_event wraps raw API streaming events (content_block_delta, etc.)
+        // Emitted with --include-partial-messages flag.
+        "stream_event" => {
+            let Some(inner) = v.get("event") else {
+                return empty;
+            };
+            let Some(inner_type) = inner.get("type").and_then(|t| t.as_str()) else {
+                return empty;
+            };
+            match inner_type {
+                "content_block_delta" => ParsedLine {
+                    events: parse_content_delta(inner).into_iter().collect(),
+                    result_text: None,
+                },
+                "content_block_start" => ParsedLine {
+                    events: parse_block_start(inner).into_iter().collect(),
+                    result_text: None,
+                },
+                // message_start, content_block_stop, message_delta, message_stop — skip
+                _ => empty,
+            }
+        }
+        // With --include-partial-messages, assistant events duplicate the text
+        // already received via stream_event deltas. Skip to avoid double output.
+        // Tool use blocks in assistant events are also duplicated by
+        // stream_event/content_block_start, so we can safely skip entirely.
+        "assistant" => empty,
+        "result" => ParsedLine {
+            events: SmallVec::from_elem(ClaudeEvent::Done, 1),
+            result_text: parse_result(&v),
+        },
+        "user" => ParsedLine {
+            events: parse_user(&v),
+            result_text: None,
+        },
+        "control_request" => ParsedLine {
+            events: parse_control_request(&v).into_iter().collect(),
+            result_text: None,
+        },
+        // Legacy top-level events (without stream_event wrapper)
+        "content_block_delta" => ParsedLine {
+            events: parse_content_delta(&v).into_iter().collect(),
+            result_text: None,
+        },
+        "content_block_start" => ParsedLine {
+            events: parse_block_start(&v).into_iter().collect(),
+            result_text: None,
+        },
         // Silently skip known non-content events
-        "rate_limit_event" => SmallVec::new(),
+        "rate_limit_event" => empty,
         _ => {
             tracing::debug!(event_type, "unknown stream event");
-            SmallVec::new()
+            empty
         }
     }
 }
 
 #[inline]
 fn parse_system(v: &serde_json::Value) -> Option<ClaudeEvent> {
-    v.get("session_id")
-        .and_then(|s| s.as_str())
-        .map(|sid| ClaudeEvent::SessionId(ClaudeSessionId::new(sid)))
+    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+    match subtype {
+        "init" | "" => v
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .map(|sid| ClaudeEvent::SessionId(ClaudeSessionId::new(sid))),
+        "api_retry" => {
+            let attempt = v.get("attempt").and_then(|a| a.as_u64()).unwrap_or(0);
+            let error = v
+                .get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("unknown");
+            tracing::warn!(attempt, error, "claude API retry");
+            None
+        }
+        _ => {
+            tracing::debug!(subtype, "unknown system subtype");
+            None
+        }
+    }
 }
 
 /// Parse "user" events — these contain tool_result blocks.
@@ -86,6 +162,9 @@ fn parse_user(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
 /// Parse the "assistant" event from Claude CLI.
 /// Format: {"type":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use","name":"Bash",...}]}}
 /// P2: fold for (events, text_buf) accumulation in a single pass.
+/// NOTE: Currently unused — with --include-partial-messages, stream_event deltas
+/// provide the same content. Kept as fallback for non-streaming mode.
+#[allow(dead_code)]
 #[inline]
 fn parse_assistant(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
     let Some(content) = v
@@ -136,19 +215,14 @@ fn parse_assistant(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
     events
 }
 
+/// Parse the "result" event. Returns the result text (if any) for the caller
+/// to decide whether to emit it (avoids duplicating content from assistant events).
 #[inline]
-fn parse_result(v: &serde_json::Value) -> Option<ClaudeEvent> {
-    if let Some(sid) = v.get("session_id").and_then(|s| s.as_str()) {
-        let _ = sid;
-    }
-
-    if let Some(result_text) = v.get("result").and_then(|r| r.as_str())
-        && !result_text.is_empty()
-    {
-        let _ = result_text;
-    }
-
-    Some(ClaudeEvent::Done)
+fn parse_result(v: &serde_json::Value) -> Option<Arc<str>> {
+    v.get("result")
+        .and_then(|r| r.as_str())
+        .filter(|s| !s.is_empty())
+        .map(Arc::from)
 }
 
 // Keep these for future API-style streaming support
@@ -338,63 +412,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_assistant_text() {
+    fn parse_assistant_skipped_with_partial_messages() {
+        // With --include-partial-messages, assistant events are skipped to avoid
+        // duplicating content already received via stream_event deltas.
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ClaudeEvent::TextDelta(t) => assert_eq!(&**t, "Hello!"),
-            other => panic!("unexpected: {other:?}"),
-        }
+        let parsed = parse_stream_line(line);
+        assert!(parsed.events.is_empty());
     }
 
     #[test]
-    fn parse_assistant_tool_use() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","id":"123","input":{}}]}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            ClaudeEvent::ToolUse { tool, .. } => assert_eq!(&**tool, "Bash"),
-            other => panic!("unexpected: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_assistant_multi_block() {
-        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"thinking..."},{"type":"tool_use","name":"Bash","id":"123","input":{"command":"ls"}},{"type":"text","text":"done"}]}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 3);
-        assert!(matches!(&events[0], ClaudeEvent::TextDelta(t) if &**t == "thinking..."));
+    fn parse_assistant_fn_directly() {
+        // parse_assistant still works if called directly (fallback for non-streaming)
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"},{"type":"tool_use","name":"Bash","id":"123","input":{"command":"ls"}}]}}"#
+        ).unwrap();
+        let events = parse_assistant(&v);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ClaudeEvent::TextDelta(t) if &**t == "Hello!"));
         assert!(matches!(&events[1], ClaudeEvent::ToolUse { tool, .. } if &**tool == "Bash"));
-        assert!(matches!(&events[2], ClaudeEvent::TextDelta(t) if &**t == "done"));
     }
 
     #[test]
     fn parse_system_init() {
         let line = r#"{"type":"system","subtype":"init","session_id":"abc-123"}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
             ClaudeEvent::SessionId(sid) => assert_eq!(sid.as_str(), "abc-123"),
             other => panic!("unexpected: {other:?}"),
         }
     }
 
     #[test]
-    fn parse_result_done() {
+    fn parse_result_with_text() {
         let line = r#"{"type":"result","result":"Hello!","session_id":"abc-123"}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        assert!(matches!(&events[0], ClaudeEvent::Done));
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        assert!(matches!(&parsed.events[0], ClaudeEvent::Done));
+        assert_eq!(&*parsed.result_text.unwrap(), "Hello!");
+    }
+
+    #[test]
+    fn parse_result_empty_text() {
+        let line = r#"{"type":"result","result":"","session_id":"abc-123"}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        assert!(matches!(&parsed.events[0], ClaudeEvent::Done));
+        assert!(parsed.result_text.is_none());
     }
 
     #[test]
     fn parse_user_tool_result() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","name":"Bash","content":"hello world","is_error":false}]}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
             ClaudeEvent::ToolResult {
                 tool,
                 is_error,
@@ -411,9 +484,9 @@ mod tests {
     #[test]
     fn parse_user_tool_result_error() {
         let line = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool_abc","content":"command failed","is_error":true}]}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
             ClaudeEvent::ToolResult {
                 tool,
                 is_error,
@@ -430,30 +503,66 @@ mod tests {
     #[test]
     fn parse_user_no_tool_result() {
         let line = r#"{"type":"user","message":{"content":[{"type":"text","text":"hello"}]}}"#;
-        let events = parse_stream_line(line);
-        assert!(events.is_empty());
+        let parsed = parse_stream_line(line);
+        assert!(parsed.events.is_empty());
     }
 
     #[test]
     fn parse_rate_limit_skipped() {
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{}}"#;
-        assert!(parse_stream_line(line).is_empty());
+        assert!(parse_stream_line(line).events.is_empty());
     }
 
     #[test]
     fn parse_garbage_skipped() {
-        assert!(parse_stream_line("not json at all").is_empty());
-        assert!(parse_stream_line("").is_empty());
+        assert!(parse_stream_line("not json at all").events.is_empty());
+        assert!(parse_stream_line("").events.is_empty());
     }
 
     #[test]
     fn parse_content_block_delta() {
         let line = r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}"#;
-        let events = parse_stream_line(line);
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
             ClaudeEvent::TextDelta(t) => assert_eq!(&**t, "hello"),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_stream_event_text_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"streaming!"}}}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            ClaudeEvent::TextDelta(t) => assert_eq!(&**t, "streaming!"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_event_tool_start() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read","id":"123"}}}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            ClaudeEvent::ToolUse { tool, .. } => assert_eq!(&**tool, "Read"),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_stream_event_message_stop_skipped() {
+        let line = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
+        let parsed = parse_stream_line(line);
+        assert!(parsed.events.is_empty());
+    }
+
+    #[test]
+    fn parse_system_api_retry() {
+        let line = r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":3,"error":"rate_limit"}"#;
+        let parsed = parse_stream_line(line);
+        assert!(parsed.events.is_empty());
     }
 }

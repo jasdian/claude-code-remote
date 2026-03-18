@@ -95,7 +95,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 
 **Native:**
 - **Rust** (stable, latest) -- or use `nix-shell` for the dev environment
-- **Claude Code CLI** (`claude`) -- installed and authenticated on your machine
+- **Claude Code CLI** (`claude`) v2.1.78+ -- installed and authenticated on your machine
 
 **Docker:**
 - **Docker** with Compose (Rust and Claude CLI are bundled in the image)

@@ -67,14 +67,25 @@ pub async fn run_claude(
     cancel: CancellationToken,
     stdin_rx: mpsc::Receiver<String>,
 ) -> Result<ClaudeProcessHandle, AppError> {
+    // Build initial prompt as stream-json user message for stdin delivery.
+    // We use --input-format stream-json instead of -p to avoid Claude blocking
+    // on piped stdin (Claude hangs when stdin is piped+open with -p mode).
+    let initial_message = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": prompt
+        }
+    })
+    .to_string();
+
     let mut cmd = Command::new(config.binary.as_ref());
-    cmd.arg("-p")
-        .arg(prompt)
-        .arg("--output-format")
+    cmd.arg("--output-format")
         .arg("stream-json")
         .arg("--input-format")
         .arg("stream-json")
-        .arg("--verbose");
+        .arg("--verbose")
+        .arg("--include-partial-messages");
 
     if config.dangerously_skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
@@ -145,19 +156,29 @@ pub async fn run_claude(
     let reader_task = tokio::spawn(async move {
         let mut child = child;
 
-        // Spawn stdin writer task
+        // Spawn stdin writer task: sends initial prompt, then relays control_responses
         if let Some(stdin) = stdin_handle {
             let stdin_cancel = reader_cancel.clone();
             tokio::spawn(async move {
                 let mut stdin = stdin;
                 let mut stdin_rx = stdin_rx;
-                tracing::debug!("stdin writer started");
+
+                // Send initial prompt as stream-json user message
+                let mut buf = initial_message.into_bytes();
+                buf.push(b'\n');
+                if stdin.write_all(&buf).await.is_err() || stdin.flush().await.is_err() {
+                    tracing::error!("failed to write initial prompt to stdin");
+                    return;
+                }
+                tracing::debug!("initial prompt sent to stdin");
+
+                // Relay control_response messages
                 loop {
                     tokio::select! {
                         _ = stdin_cancel.cancelled() => break,
                         msg = stdin_rx.recv() => {
                             let Some(line) = msg else { break };
-                            tracing::debug!(bytes = line.len(), "writing control_response to stdin");
+                            tracing::debug!(bytes = line.len(), "writing to stdin");
                             let mut buf = line.into_bytes();
                             buf.push(b'\n');
                             if stdin.write_all(&buf).await.is_err() || stdin.flush().await.is_err() {
@@ -188,7 +209,8 @@ pub async fn run_claude(
 
         let reader = BufReader::with_capacity(STDOUT_BUF_CAPACITY, stdout);
         let mut lines = reader.lines();
-        let mut got_events = false;
+        let mut got_content = false;
+        let mut line_count: u32 = 0;
 
         'reader: loop {
             tokio::select! {
@@ -199,12 +221,39 @@ pub async fn run_claude(
                 line_result = lines.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
-                            tracing::debug!(line, "claude stdout");
-                            let events = super::parser::parse_stream_line(&line);
-                            if !events.is_empty() {
-                                got_events = true;
+                            line_count += 1;
+                            if line_count <= 3 {
+                                tracing::debug!(line_count, line, "claude stdout (first lines)");
+                            } else {
+                                tracing::trace!(line, "claude stdout");
                             }
-                            for event in events {
+                            let parsed = super::parser::parse_stream_line(&line);
+
+                            // If result event has text and we haven't sent content yet,
+                            // emit it as TextDelta (avoids duplicating assistant events).
+                            if let Some(result_text) = parsed.result_text
+                                && !got_content
+                            {
+                                tracing::info!("emitting result text as fallback content");
+                                got_content = true;
+                                if event_tx.send(ClaudeEvent::TextDelta(result_text)).await.is_err() {
+                                    break 'reader;
+                                }
+                            }
+
+                            for event in &parsed.events {
+                                if matches!(event,
+                                    ClaudeEvent::TextDelta(_)
+                                    | ClaudeEvent::ToolUse { .. }
+                                    | ClaudeEvent::ToolResult { .. }
+                                    | ClaudeEvent::ControlRequest(_)
+                                    | ClaudeEvent::Error(_)
+                                    | ClaudeEvent::ExitError(_)
+                                ) {
+                                    got_content = true;
+                                }
+                            }
+                            for event in parsed.events {
                                 if event_tx.send(event).await.is_err() {
                                     break 'reader;
                                 }
@@ -244,8 +293,10 @@ pub async fn run_claude(
                 }
             }
 
-            // Legacy fallback: if no events and no ExitError was sent, send Error
-            if !got_events && exit_code == Some(0) {
+            tracing::debug!(line_count, got_content, ?exit_code, "claude process finished");
+
+            // Fallback: if no content events were produced, send Error
+            if !got_content && exit_code == Some(0) {
                 if !stderr_output.is_empty() {
                     let _ = event_tx
                         .send(ClaudeEvent::Error(
