@@ -72,7 +72,7 @@ pub async fn handle_message(
     msg: &serenity::Message,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    if msg.author.bot {
+    if msg.author.bot || state.shutdown.is_cancelled() {
         return Ok(());
     }
 

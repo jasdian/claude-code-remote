@@ -242,14 +242,21 @@ async fn stream_events(
                     }
                     Some(ClaudeEvent::ToolResult { tool, is_error, output_preview }) => {
                         let status = if is_error { "failed" } else { "done" };
-                        // Update audit record with result (best-effort).
-                        // tool_result blocks use tool_use_id (e.g. "toolu_abc") not tool name,
-                        // so match by name first, then fall back to oldest entry (FIFO order
-                        // is guaranteed by Claude's sequential/parallel tool execution).
+                        let is_tool_use_id = tool.starts_with("toolu_");
+
+                        // Match result to audit entry: by tool name first, then FIFO
+                        // for tool_use_id results (only when exactly one entry pending
+                        // to avoid mismatching subagent results to top-level tools).
                         let audit_pos = latest_audit_id
                             .iter()
                             .position(|(t, _)| t == &tool)
-                            .or_else(|| if !latest_audit_id.is_empty() { Some(0) } else { None });
+                            .or_else(|| {
+                                if is_tool_use_id && latest_audit_id.len() == 1 {
+                                    Some(0)
+                                } else {
+                                    None
+                                }
+                            });
                         if let Some(pos) = audit_pos {
                             let (matched_tool, audit_id) = latest_audit_id.remove(pos);
                             let duration_ms = tool_timers
@@ -259,13 +266,15 @@ async fn stream_events(
                             let _ = crate::db::update_tool_result(
                                 &state.db, audit_id, is_error, &output_preview, duration_ms,
                             ).await;
-                            // Use matched tool name for display (not tool_use_id)
                             send_message(http, channel_id,
                                 &format!("_{} {status}_", &*matched_tool)).await;
                             continue;
                         }
-                        send_message(http, channel_id,
-                            &format!("_{} {status}_", &*tool)).await;
+                        // Suppress raw tool_use_id display (subagent noise)
+                        if !is_tool_use_id {
+                            send_message(http, channel_id,
+                                &format!("_{} {status}_", &*tool)).await;
+                        }
                     }
                     Some(ClaudeEvent::ControlRequest(cr)) => {
                         if !buffer.is_empty() {

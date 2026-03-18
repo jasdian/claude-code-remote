@@ -140,11 +140,17 @@ fn parse_user(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
             if block_type != "tool_result" {
                 return None;
             }
+            // Prefer tool name; fall back to tool_use_id for formatter's
+            // FIFO audit matching (the formatter replaces it with the real name).
             let tool = block
                 .get("name")
                 .and_then(|n| n.as_str())
-                .or_else(|| block.get("tool_use_id").and_then(|id| id.as_str()))
-                .unwrap_or("unknown");
+                .unwrap_or_else(|| {
+                    block
+                        .get("tool_use_id")
+                        .and_then(|id| id.as_str())
+                        .unwrap_or("tool")
+                });
             let is_error = block
                 .get("is_error")
                 .and_then(|e| e.as_bool())
