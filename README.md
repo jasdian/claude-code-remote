@@ -37,9 +37,9 @@ It also works great for **solo use** -- talk to Claude Code from your phone whil
 2. Bot spawns a `claude` subprocess on your machine (using `--input-format stream-json`)
 3. A Discord thread is created; Claude's response streams in real-time
 4. Bob opens the thread and types a follow-up -- he's **auto-joined** as a participant
-5. Carol uses `/join` to participate; `/participants` shows everyone in the session
+5. Carol types in the thread too -- she's auto-joined; `/participants` shows everyone in the session
 6. Every message is attributed: Claude knows who said what
-7. Alice (the owner) can `/kick` someone or `/end` the session
+7. Alice (the owner) can `/sessionkick` someone or `/end` the session
 
 Works in both **DMs** (just message the bot directly) and **server channels** (creates a thread per session).
 

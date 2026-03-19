@@ -40,7 +40,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /// Schema version.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i32 = sqlx::query_scalar("PRAGMA user_version")
@@ -178,10 +178,21 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await?;
 
+        sqlx::query("PRAGMA user_version = 2").execute(pool).await?;
+        tracing::info!("migration: v{} -> v2", version.max(1));
+    }
+
+    if version < 3 {
+        sqlx::query(
+            "ALTER TABLE session_summaries ADD COLUMN signatures_changed TEXT NOT NULL DEFAULT '[]'",
+        )
+        .execute(pool)
+        .await?;
+
         sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)
             .await?;
-        tracing::info!("migration: v{} -> v{SCHEMA_VERSION}", version.max(1));
+        tracing::info!("migration: v2 -> v{SCHEMA_VERSION}");
     }
 
     Ok(())
@@ -775,6 +786,7 @@ pub struct SessionSummaryRow {
     pub project: String,
     pub status: String,
     pub files_touched: String,
+    pub signatures_changed: String,
     pub tools_summary: String,
     pub work_description: String,
     pub last_tool_use_id: i64,
@@ -788,6 +800,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionSummaryRow {
             project: row.try_get("project")?,
             status: row.try_get("status")?,
             files_touched: row.try_get("files_touched")?,
+            signatures_changed: row.try_get("signatures_changed")?,
             tools_summary: row.try_get("tools_summary")?,
             work_description: row.try_get("work_description")?,
             last_tool_use_id: row.try_get("last_tool_use_id")?,
@@ -802,6 +815,7 @@ pub struct SummaryUpsert<'a> {
     pub project: &'a str,
     pub status: &'a str,
     pub files_touched: &'a str,
+    pub signatures_changed: &'a str,
     pub tools_summary: &'a str,
     pub work_description: &'a str,
     pub last_tool_use_id: i64,
@@ -815,13 +829,14 @@ pub async fn upsert_session_summary(
     let tid = params.thread_id.get() as i64;
     sqlx::query(&format!(
         "INSERT OR REPLACE INTO session_summaries
-         (thread_id, project, status, files_touched, tools_summary, work_description, last_tool_use_id, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, {NOW_UTC})"
+         (thread_id, project, status, files_touched, signatures_changed, tools_summary, work_description, last_tool_use_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, {NOW_UTC})"
     ))
     .bind(tid)
     .bind(params.project)
     .bind(params.status)
     .bind(params.files_touched)
+    .bind(params.signatures_changed)
     .bind(params.tools_summary)
     .bind(params.work_description)
     .bind(params.last_tool_use_id)
@@ -839,8 +854,8 @@ pub async fn get_sibling_summaries(
 ) -> Result<Vec<SessionSummaryRow>, AppError> {
     let exclude_tid = exclude_thread_id.get() as i64;
     let rows: Vec<SessionSummaryRow> = sqlx::query_as(
-        "SELECT thread_id, project, status, files_touched, tools_summary,
-                work_description, last_tool_use_id, updated_at
+        "SELECT thread_id, project, status, files_touched, signatures_changed,
+                tools_summary, work_description, last_tool_use_id, updated_at
          FROM session_summaries
          WHERE project = ? AND thread_id != ? AND status IN ('active', 'idle')
          ORDER BY updated_at DESC",

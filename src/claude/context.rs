@@ -34,6 +34,97 @@ fn shorten_path(path: &str) -> String {
     parts.into_iter().rev().collect::<Vec<_>>().join("/")
 }
 
+// --- Signature extraction ---
+
+/// Keywords that start a Rust item signature.
+const SIGNATURE_KEYWORDS: &[&str] = &[
+    "pub fn ",
+    "fn ",
+    "pub struct ",
+    "struct ",
+    "pub enum ",
+    "enum ",
+    "impl ",
+    "pub trait ",
+    "trait ",
+    "pub type ",
+    "type ",
+    "pub const ",
+    "const ",
+    "pub static ",
+    "static ",
+    "macro_rules!",
+];
+
+/// Maximum length for a single extracted signature.
+const MAX_SIGNATURE_LEN: usize = 120;
+
+/// Maximum number of signatures stored per session.
+const MAX_SIGNATURES_PER_SESSION: usize = 20;
+
+/// Extract Rust item signatures from Edit/Write tool input JSON.
+/// P2: filter_map chain for single-pass extraction. P3: SmallVec for small lists.
+pub fn extract_signatures(tool: &str, input_json: &str) -> SmallVec<[String; 4]> {
+    let v: serde_json::Value = match serde_json::from_str(input_json) {
+        Ok(v) => v,
+        Err(_) => return SmallVec::new(),
+    };
+
+    let mut sigs = SmallVec::new();
+
+    match tool {
+        "Edit" => {
+            // new_string has new/modified signatures
+            if let Some(new_str) = v.get("new_string").and_then(|s| s.as_str()) {
+                extract_sigs_from_text(new_str, &mut sigs);
+            }
+            // old_string has removed signatures (still relevant for awareness)
+            if let Some(old_str) = v.get("old_string").and_then(|s| s.as_str()) {
+                extract_sigs_from_text(old_str, &mut sigs);
+            }
+        }
+        "Write" => {
+            if let Some(content) = v.get("content").and_then(|s| s.as_str()) {
+                extract_sigs_from_text(content, &mut sigs);
+            }
+        }
+        _ => {}
+    }
+
+    sigs
+}
+
+/// Extract signature lines from a block of text.
+/// P5: #[inline] — called on hot summarizer path.
+#[inline]
+fn extract_sigs_from_text(text: &str, sigs: &mut SmallVec<[String; 4]>) {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let is_sig = SIGNATURE_KEYWORDS.iter().any(|kw| trimmed.starts_with(kw));
+        if !is_sig {
+            continue;
+        }
+
+        // Trim at opening brace or end of line
+        let sig = match trimmed.find('{') {
+            Some(pos) => trimmed[..pos].trim(),
+            None => trimmed,
+        };
+
+        // Truncate long signatures
+        let sig = if sig.len() > MAX_SIGNATURE_LEN {
+            &sig[..sig.floor_char_boundary(MAX_SIGNATURE_LEN)]
+        } else {
+            sig
+        };
+
+        // Deduplicate
+        if !sigs.iter().any(|s| s == sig) {
+            sigs.push(sig.to_string());
+        }
+    }
+}
+
 // --- Tool activity summary ---
 
 /// Build compact tool summary like "Read:12, Edit:3, Bash:5".
@@ -134,8 +225,8 @@ pub async fn build_context_prompt(
 
     // Get our own files for conflict detection
     let my_summary: Option<SessionSummaryRow> = sqlx::query_as(
-        "SELECT thread_id, project, status, files_touched, tools_summary,
-                work_description, last_tool_use_id, updated_at
+        "SELECT thread_id, project, status, files_touched, signatures_changed,
+                tools_summary, work_description, last_tool_use_id, updated_at
          FROM session_summaries WHERE thread_id = ?",
     )
     .bind(thread_id.get() as i64)
@@ -191,6 +282,13 @@ pub async fn build_context_prompt(
         if !files.is_empty() {
             let files_str = files.join(", ");
             let _ = writeln!(out, "Files: {files_str}");
+        }
+
+        // Signatures (compact list of changed/created item signatures)
+        let sigs: Vec<String> = serde_json::from_str(&sib.signatures_changed).unwrap_or_default();
+        if !sigs.is_empty() {
+            let sigs_str = sigs.join(", ");
+            let _ = writeln!(out, "Signatures: {sigs_str}");
         }
 
         // Work description
@@ -272,16 +370,21 @@ pub async fn update_summaries(pool: &SqlitePool) {
             continue;
         }
 
-        // Extract file paths from new tool uses (deduplicated)
+        // Extract file paths and signatures from new tool uses (deduplicated)
         let mut files: Vec<String> = Vec::new();
+        let mut signatures: Vec<String> = Vec::new();
 
-        // Load existing files from previous summary (P2: collapsed let-chains)
+        // Load existing files + signatures from previous summary (P2: collapsed let-chains)
         if let Ok(existing_summary) =
             db::get_sibling_summaries(pool, project, ThreadId::new(0)).await
             && let Some(prev) = existing_summary.iter().find(|s| s.thread_id == *tid_i64)
-            && let Ok(prev_files) = serde_json::from_str::<Vec<String>>(&prev.files_touched)
         {
-            files = prev_files;
+            if let Ok(prev_files) = serde_json::from_str::<Vec<String>>(&prev.files_touched) {
+                files = prev_files;
+            }
+            if let Ok(prev_sigs) = serde_json::from_str::<Vec<String>>(&prev.signatures_changed) {
+                signatures = prev_sigs;
+            }
         }
 
         // Add new files (P2: filter_map + dedup)
@@ -291,6 +394,17 @@ pub async fn update_summaries(pool: &SqlitePool) {
             .for_each(|path| {
                 if !files.contains(&path) {
                     files.push(path);
+                }
+            });
+
+        // Extract signatures from Edit/Write tool uses (P2: filter + flat_map + dedup)
+        new_tool_uses
+            .iter()
+            .filter(|tu| tu.tool == "Edit" || tu.tool == "Write")
+            .flat_map(|tu| extract_signatures(&tu.tool, &tu.input_json))
+            .for_each(|sig| {
+                if !signatures.contains(&sig) && signatures.len() < MAX_SIGNATURES_PER_SESSION {
+                    signatures.push(sig);
                 }
             });
 
@@ -305,6 +419,7 @@ pub async fn update_summaries(pool: &SqlitePool) {
         let work_description = build_work_description(&recent_msgs, &tools_summary, files.len());
 
         let files_json = serde_json::to_string(&files).unwrap_or_else(|_| "[]".to_string());
+        let sigs_json = serde_json::to_string(&signatures).unwrap_or_else(|_| "[]".to_string());
 
         let new_watermark = new_tool_uses.last().map(|tu| tu.id).unwrap_or(watermark);
 
@@ -315,6 +430,7 @@ pub async fn update_summaries(pool: &SqlitePool) {
                 project,
                 status,
                 files_touched: &files_json,
+                signatures_changed: &sigs_json,
                 tools_summary: &tools_summary,
                 work_description: &work_description,
                 last_tool_use_id: new_watermark,
@@ -456,6 +572,7 @@ mod tests {
             project: "proj".into(),
             status: "active".into(),
             files_touched: r#"["src/config.rs","src/db.rs"]"#.into(),
+            signatures_changed: "[]".into(),
             tools_summary: String::new(),
             work_description: String::new(),
             last_tool_use_id: 0,
@@ -475,6 +592,7 @@ mod tests {
             project: "proj".into(),
             status: "active".into(),
             files_touched: r#"["src/db.rs"]"#.into(),
+            signatures_changed: "[]".into(),
             tools_summary: String::new(),
             work_description: String::new(),
             last_tool_use_id: 0,
@@ -482,6 +600,62 @@ mod tests {
         };
         let conflicts = detect_conflicts(&my_files, &[sibling]);
         assert!(conflicts.is_empty());
+    }
+
+    // --- Signature extraction tests ---
+
+    #[test]
+    fn extract_signatures_edit_fn() {
+        let json = r#"{"file_path":"/src/main.rs","old_string":"fn old()","new_string":"pub fn parse_config(&self) -> Result<Config> {\n    todo!()\n}"}"#;
+        let sigs = extract_signatures("Edit", json);
+        assert_eq!(sigs.len(), 2);
+        assert!(sigs[0].contains("pub fn parse_config"));
+        assert!(sigs[1].contains("fn old()"));
+    }
+
+    #[test]
+    fn extract_signatures_edit_struct() {
+        let json = r#"{"file_path":"/src/domain.rs","old_string":"","new_string":"pub struct AppConfig {\n    name: String,\n}"}"#;
+        let sigs = extract_signatures("Edit", json);
+        assert_eq!(sigs.len(), 1);
+        assert_eq!(sigs[0], "pub struct AppConfig");
+    }
+
+    #[test]
+    fn extract_signatures_write_multiple() {
+        let json = r#"{"file_path":"/src/lib.rs","content":"pub fn foo() -> u32 {\n    42\n}\n\nimpl Display for Bar {\n    fn fmt(&self) -> fmt::Result { todo!() }\n}\n\npub enum Status {\n    Active,\n    Idle,\n}\n\ntrait Worker {\n    fn run(&self);\n}\n"}"#;
+        let sigs = extract_signatures("Write", json);
+        assert!(sigs.len() >= 4);
+        assert!(sigs.iter().any(|s| s.contains("pub fn foo")));
+        assert!(sigs.iter().any(|s| s.contains("impl Display for Bar")));
+        assert!(sigs.iter().any(|s| s.contains("pub enum Status")));
+        assert!(sigs.iter().any(|s| s.contains("trait Worker")));
+    }
+
+    #[test]
+    fn extract_signatures_non_edit_write_returns_empty() {
+        let json = r#"{"command":"cargo build"}"#;
+        assert!(extract_signatures("Bash", json).is_empty());
+        assert!(extract_signatures("Read", r#"{"file_path":"/src/main.rs"}"#).is_empty());
+    }
+
+    #[test]
+    fn extract_signatures_truncates_long() {
+        let long_fn = format!(
+            r#"{{"file_path":"/a.rs","content":"pub fn {}() -> Result<(), Error>"}}"#,
+            "a".repeat(200)
+        );
+        let sigs = extract_signatures("Write", &long_fn);
+        assert_eq!(sigs.len(), 1);
+        assert!(sigs[0].len() <= MAX_SIGNATURE_LEN);
+    }
+
+    #[test]
+    fn extract_signatures_deduplicates() {
+        let json =
+            r#"{"file_path":"/a.rs","old_string":"fn dup() { }","new_string":"fn dup() { }"}"#;
+        let sigs = extract_signatures("Edit", json);
+        assert_eq!(sigs.len(), 1);
     }
 
     #[test]
