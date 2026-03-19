@@ -513,6 +513,23 @@ async fn send_message(http: &serenity::Http, channel_id: serenity::ChannelId, co
     }
 }
 
+/// Format a chrono Duration as compact human-readable text (e.g. "5m", "2h 15m", "1d 3h").
+pub fn format_duration(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds().max(0);
+    let days = total_secs / 86400;
+    let hours = (total_secs % 86400) / 3600;
+    let mins = (total_secs % 3600) / 60;
+
+    match (days, hours, mins) {
+        (0, 0, 0) => "< 1m".to_string(),
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +588,16 @@ mod tests {
         let result = replace_command_name_tags(input);
         assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
         assert_eq!(&*result, input);
+    }
+
+    #[test]
+    fn duration_formatting() {
+        assert_eq!(format_duration(chrono::Duration::seconds(0)), "< 1m");
+        assert_eq!(format_duration(chrono::Duration::seconds(30)), "< 1m");
+        assert_eq!(format_duration(chrono::Duration::minutes(5)), "5m");
+        assert_eq!(format_duration(chrono::Duration::minutes(135)), "2h 15m");
+        assert_eq!(format_duration(chrono::Duration::hours(3)), "3h");
+        assert_eq!(format_duration(chrono::Duration::hours(25)), "1d 1h");
+        assert_eq!(format_duration(chrono::Duration::hours(48)), "2d");
     }
 }

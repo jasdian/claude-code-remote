@@ -250,9 +250,32 @@ pub async fn interrupt(
 pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
     check_auth(&ctx).await?;
-    let count = ctx.data().session_manager.active_count();
-    let max = ctx.data().config.claude.max_sessions;
-    ctx.say(format!("Active sessions: {count}/{max}")).await?;
+    let state = ctx.data();
+    let max = state.config.claude.max_sessions;
+
+    let live = crate::db::get_live_sessions(&state.db).await?;
+    if live.is_empty() {
+        ctx.say(format!("No active sessions. (max: {max})")).await?;
+        return Ok(());
+    }
+
+    let now = chrono::Utc::now();
+    let mut out = format!("**Active sessions: {}/{}**\n", live.len(), max);
+    for s in &live {
+        let age = super::formatter::format_duration(now - s.created_at);
+        let status = if state.session_manager.has_session(s.thread_id) {
+            "active"
+        } else {
+            "idle"
+        };
+        out.push_str(&format!(
+            "• <#{}> — **{}** — {age} — <@{}> ({status})\n",
+            s.thread_id.get(),
+            s.project,
+            s.owner_id.get(),
+        ));
+    }
+    ctx.say(&out).await?;
     Ok(())
 }
 

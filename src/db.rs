@@ -280,6 +280,21 @@ pub async fn get_any_session_by_thread(
     Ok(row.map(session_from_row))
 }
 
+/// Fetch all active/idle sessions, ordered by creation time (newest first).
+pub async fn get_live_sessions(pool: &SqlitePool) -> Result<Vec<Session>, AppError> {
+    let rows: Vec<SessionRow> = sqlx::query_as(
+        "SELECT id, thread_id, owner_id, claude_session_id, project, status,
+                created_at, last_active_at, worktree_path
+         FROM sessions WHERE status IN (?, ?)
+         ORDER BY created_at DESC",
+    )
+    .bind(SessionStatus::Active.as_str())
+    .bind(SessionStatus::Idle.as_str())
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(session_from_row).collect())
+}
+
 /// Delete session row by thread_id (to allow creating a fresh one on the same thread).
 pub async fn delete_session_by_thread(
     pool: &SqlitePool,

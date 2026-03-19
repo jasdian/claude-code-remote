@@ -245,7 +245,7 @@ The `allowed_tools` list controls which tools Claude can use:
 | `/compact` | Session thread | Summarize conversation to reduce context usage |
 | `/context` | Session thread | Show current context window and token usage |
 | `/end` | Session thread | Stop session and archive the thread (owner/admin only) |
-| `/sessions` | Anywhere | Show active session count |
+| `/sessions` | Anywhere | List active sessions with thread links, project names, age, and status |
 
 #### Collaboration
 
@@ -443,7 +443,6 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 
 Potential future features:
 
-- **Session list with details** -- Enhance `/sessions` to show thread links, project names, and session age
 - **File attachment support** -- Send files/images via Discord attachments for Claude to read
 - **Reaction-based approval UI** -- Discord button components instead of text replies for permission prompts and user questions; collaborative sessions could require quorum approval
 - **`/health` endpoint** -- HTTP health check for monitoring (lightweight Axum or Hyper)
