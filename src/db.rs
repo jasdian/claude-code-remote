@@ -618,6 +618,14 @@ pub async fn get_tool_use_detail(
     Ok(row)
 }
 
+pub async fn get_latest_tool_use_id(pool: &SqlitePool) -> Result<Option<i64>, AppError> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM tool_uses ORDER BY id DESC LIMIT 1")
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|r| r.0))
+}
+
 // --- Access requests ---
 
 pub async fn create_access_request(

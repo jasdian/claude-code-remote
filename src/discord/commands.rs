@@ -460,9 +460,14 @@ pub async fn audit(
     check_admin(&ctx)?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
 
-    // Detail mode: show full input_json for a specific ID
+    // Detail mode: show full input_json for a specific ID (latest if omitted)
     if detail.unwrap_or(false) {
-        let target_id = id.unwrap_or(0);
+        let target_id = match id {
+            Some(i) => i,
+            None => crate::db::get_latest_tool_use_id(&ctx.data().db)
+                .await?
+                .unwrap_or(0),
+        };
         return audit_detail(&ctx, target_id).await;
     }
 
