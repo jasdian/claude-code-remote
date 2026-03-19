@@ -29,6 +29,16 @@ session_timeout_minutes = 30
 # Requires `gh` CLI authenticated. Per-project override available.
 # auto_pr = false
 
+# Context sharing between concurrent sessions on the same project.
+# When enabled, a background task periodically summarizes each session's
+# activity (files touched, tools used, recent messages) and injects
+# sibling summaries into the system prompt — enabling coordination
+# and conflict detection across parallel sessions.
+[claude.context_sharing]
+# enabled = false
+# interval_seconds = 120
+# max_summary_chars = 1500
+
 # Per-project overrides: use /claude <prompt> myapp to activate
 [claude.projects.myapp]
 cwd = "/home/you/projects/myapp"

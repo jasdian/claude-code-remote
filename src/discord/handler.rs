@@ -374,12 +374,25 @@ async fn start_claude(
         crate::claude::worktree::setup_coauthor_hook(wt, coauthors_content.as_deref()).await;
     }
 
-    let combined_prompt = match (&config.system_prompt, &coauthor_block) {
-        (Some(base), Some(coauthor)) => Some(format!("{base}\n\n{coauthor}")),
-        (None, Some(coauthor)) => Some(coauthor.clone()),
-        (Some(_), None) => None, // use config default via None override
-        (None, None) => None,
+    // Fetch sibling context summaries (if context sharing enabled)
+    let context_block = if state.config.claude.context_sharing.enabled {
+        let project_name = project.unwrap_or("");
+        crate::claude::context::build_context_prompt(
+            &state.db,
+            thread_id,
+            project_name,
+            state.config.claude.context_sharing.max_summary_chars,
+        )
+        .await
+    } else {
+        None
     };
+
+    let combined_prompt = crate::claude::context::assemble_system_prompt(
+        config.system_prompt.as_deref(),
+        coauthor_block.as_deref(),
+        context_block.as_deref(),
+    );
 
     let (tx, rx) = crate::claude::process::event_channel();
     let (stdin_tx, stdin_rx) = crate::claude::process::stdin_channel();

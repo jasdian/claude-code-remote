@@ -80,12 +80,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let _ = claude_crew::db::update_session_status(
                                 &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
                             ).await;
+                            let _ = claude_crew::db::mark_summary_status(
+                                &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
+                            ).await;
                         }
                     }
                 }
             }
         }
     });
+
+    // Spawn context summarizer (if enabled)
+    if state.config.claude.context_sharing.enabled {
+        let ctx_state = Arc::clone(&state);
+        let ctx_cancel = shutdown.child_token();
+        let interval_secs = state.config.claude.context_sharing.interval_seconds;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                tokio::select! {
+                    _ = ctx_cancel.cancelled() => {
+                        tracing::info!("context summarizer shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        claude_crew::claude::context::update_summaries(
+                            &ctx_state.db,
+                        ).await;
+                    }
+                }
+            }
+        });
+        tracing::info!(interval_secs, "context summarizer started");
+    }
 
     // Spawn Discord bot as a separate task (Tokio recommended pattern)
     tracing::info!("starting discord bot");

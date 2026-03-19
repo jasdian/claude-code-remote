@@ -129,11 +129,24 @@ pub async fn stream_to_discord(
             .and_then(|p| {
                 crate::domain::build_coauthor_prompt(&p, &state.config.auth.user_identities)
             });
-        let system_prompt_override = match (&config.system_prompt, &coauthor_block) {
-            (Some(base), Some(coauthor)) => Some(format!("{base}\n\n{coauthor}")),
-            (None, Some(coauthor)) => Some(coauthor.clone()),
-            _ => None,
+        // Fetch sibling context summaries (if context sharing enabled)
+        let context_block = if state.config.claude.context_sharing.enabled {
+            crate::claude::context::build_context_prompt(
+                &state.db,
+                thread_id,
+                &session.project,
+                state.config.claude.context_sharing.max_summary_chars,
+            )
+            .await
+        } else {
+            None
         };
+
+        let system_prompt_override = crate::claude::context::assemble_system_prompt(
+            config.system_prompt.as_deref(),
+            coauthor_block.as_deref(),
+            context_block.as_deref(),
+        );
 
         let handle = crate::claude::process::run_claude(
             config,

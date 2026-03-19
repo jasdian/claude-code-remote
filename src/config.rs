@@ -44,6 +44,28 @@ struct RawClaudeConfig {
     use_worktrees: bool,
     #[serde(default)]
     auto_pr: bool,
+    #[serde(default)]
+    context_sharing: RawContextSharingConfig,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawContextSharingConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_context_interval")]
+    interval_seconds: u64,
+    #[serde(default = "default_max_summary_chars")]
+    max_summary_chars: usize,
+}
+
+impl Default for RawContextSharingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_seconds: default_context_interval(),
+            max_summary_chars: default_max_summary_chars(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +132,12 @@ const fn default_max_sessions() -> usize {
 const fn default_timeout() -> u64 {
     30
 }
+const fn default_context_interval() -> u64 {
+    120
+}
+const fn default_max_summary_chars() -> usize {
+    1500
+}
 fn default_level() -> String {
     "info".into()
 }
@@ -146,6 +174,14 @@ pub struct ClaudeConfig {
     pub dangerously_skip_permissions: bool,
     pub use_worktrees: bool,
     pub auto_pr: bool,
+    pub context_sharing: ContextSharingConfig,
+}
+
+#[derive(Debug)]
+pub struct ContextSharingConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub max_summary_chars: usize,
 }
 
 #[derive(Debug)]
@@ -292,6 +328,11 @@ impl AppConfig {
                 dangerously_skip_permissions: raw.claude.dangerously_skip_permissions,
                 use_worktrees: raw.claude.use_worktrees,
                 auto_pr: raw.claude.auto_pr,
+                context_sharing: ContextSharingConfig {
+                    enabled: raw.claude.context_sharing.enabled,
+                    interval_seconds: raw.claude.context_sharing.interval_seconds,
+                    max_summary_chars: raw.claude.context_sharing.max_summary_chars,
+                },
             },
             database: DatabaseConfig {
                 url: Arc::from(raw.database.url.as_str()),

@@ -40,7 +40,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /// Schema version.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i32 = sqlx::query_scalar("PRAGMA user_version")
@@ -151,10 +151,37 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await?;
 
+        sqlx::query("PRAGMA user_version = 1").execute(pool).await?;
+        tracing::info!("migration: v{version} -> v1");
+    }
+
+    if version < 2 {
+        sqlx::query(&format!(
+            "CREATE TABLE IF NOT EXISTS session_summaries (
+                thread_id INTEGER PRIMARY KEY,
+                project TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                files_touched TEXT NOT NULL DEFAULT '[]',
+                tools_summary TEXT NOT NULL DEFAULT '',
+                work_description TEXT NOT NULL DEFAULT '',
+                last_tool_use_id INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
+                FOREIGN KEY (thread_id) REFERENCES sessions(thread_id) ON DELETE CASCADE
+            )"
+        ))
+        .execute(pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_summaries_project ON session_summaries(project)",
+        )
+        .execute(pool)
+        .await?;
+
         sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)
             .await?;
-        tracing::info!("migration: v{version} -> v{SCHEMA_VERSION}");
+        tracing::info!("migration: v{} -> v{SCHEMA_VERSION}", version.max(1));
     }
 
     Ok(())
@@ -619,10 +646,9 @@ pub async fn get_tool_use_detail(
 }
 
 pub async fn get_latest_tool_use_id(pool: &SqlitePool) -> Result<Option<i64>, AppError> {
-    let row: Option<(i64,)> =
-        sqlx::query_as("SELECT id FROM tool_uses ORDER BY id DESC LIMIT 1")
-            .fetch_optional(pool)
-            .await?;
+    let row: Option<(i64,)> = sqlx::query_as("SELECT id FROM tool_uses ORDER BY id DESC LIMIT 1")
+        .fetch_optional(pool)
+        .await?;
     Ok(row.map(|r| r.0))
 }
 
@@ -682,4 +708,188 @@ pub async fn get_pending_requests(
         .into_iter()
         .map(|(id, name, ts)| (id as u64, name, ts))
         .collect())
+}
+
+// --- Session summaries (context sharing) ---
+
+/// Row for context-aware session summaries.
+pub struct SessionSummaryRow {
+    pub thread_id: i64,
+    pub project: String,
+    pub status: String,
+    pub files_touched: String,
+    pub tools_summary: String,
+    pub work_description: String,
+    pub last_tool_use_id: i64,
+    pub updated_at: String,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for SessionSummaryRow {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            thread_id: row.try_get("thread_id")?,
+            project: row.try_get("project")?,
+            status: row.try_get("status")?,
+            files_touched: row.try_get("files_touched")?,
+            tools_summary: row.try_get("tools_summary")?,
+            work_description: row.try_get("work_description")?,
+            last_tool_use_id: row.try_get("last_tool_use_id")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
+/// Parameters for upserting a session summary.
+pub struct SummaryUpsert<'a> {
+    pub thread_id: ThreadId,
+    pub project: &'a str,
+    pub status: &'a str,
+    pub files_touched: &'a str,
+    pub tools_summary: &'a str,
+    pub work_description: &'a str,
+    pub last_tool_use_id: i64,
+}
+
+/// Upsert a session summary (INSERT OR REPLACE).
+pub async fn upsert_session_summary(
+    pool: &SqlitePool,
+    params: &SummaryUpsert<'_>,
+) -> Result<(), AppError> {
+    let tid = params.thread_id.get() as i64;
+    sqlx::query(&format!(
+        "INSERT OR REPLACE INTO session_summaries
+         (thread_id, project, status, files_touched, tools_summary, work_description, last_tool_use_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, {NOW_UTC})"
+    ))
+    .bind(tid)
+    .bind(params.project)
+    .bind(params.status)
+    .bind(params.files_touched)
+    .bind(params.tools_summary)
+    .bind(params.work_description)
+    .bind(params.last_tool_use_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Fetch sibling summaries for the same project, excluding the given thread.
+/// P2: returns only active/idle siblings.
+pub async fn get_sibling_summaries(
+    pool: &SqlitePool,
+    project: &str,
+    exclude_thread_id: ThreadId,
+) -> Result<Vec<SessionSummaryRow>, AppError> {
+    let exclude_tid = exclude_thread_id.get() as i64;
+    let rows: Vec<SessionSummaryRow> = sqlx::query_as(
+        "SELECT thread_id, project, status, files_touched, tools_summary,
+                work_description, last_tool_use_id, updated_at
+         FROM session_summaries
+         WHERE project = ? AND thread_id != ? AND status IN ('active', 'idle')
+         ORDER BY updated_at DESC",
+    )
+    .bind(project)
+    .bind(exclude_tid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Mark a summary's status (e.g. when session stops/expires).
+pub async fn mark_summary_status(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    status: SessionStatus,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query("UPDATE session_summaries SET status = ? WHERE thread_id = ?")
+        .bind(status.as_str())
+        .bind(tid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Get the current high-watermark for a session's summary.
+pub async fn get_summary_watermark(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<i64, AppError> {
+    let tid = thread_id.get() as i64;
+    let wm: Option<(i64,)> =
+        sqlx::query_as("SELECT last_tool_use_id FROM session_summaries WHERE thread_id = ?")
+            .bind(tid)
+            .fetch_optional(pool)
+            .await?;
+    Ok(wm.map(|r| r.0).unwrap_or(0))
+}
+
+/// Minimal tool use row for context extraction (includes input_json).
+pub struct ContextToolUseRow {
+    pub id: i64,
+    pub tool: String,
+    pub input_json: String,
+}
+
+impl<'r> FromRow<'r, SqliteRow> for ContextToolUseRow {
+    fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(Self {
+            id: row.try_get("id")?,
+            tool: row.try_get("tool")?,
+            input_json: row.try_get("input_json")?,
+        })
+    }
+}
+
+/// Fetch tool uses after a given ID for incremental summarization.
+pub async fn get_tool_uses_after(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    after_id: i64,
+) -> Result<Vec<ContextToolUseRow>, AppError> {
+    let tid = thread_id.get() as i64;
+    let rows: Vec<ContextToolUseRow> = sqlx::query_as(
+        "SELECT id, tool, input_json FROM tool_uses
+         WHERE thread_id = ? AND id > ?
+         ORDER BY id ASC",
+    )
+    .bind(tid)
+    .bind(after_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Fetch recent messages for a session (for work description).
+pub async fn get_recent_messages(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    limit: i64,
+) -> Result<Vec<(String, String)>, AppError> {
+    let tid = thread_id.get() as i64;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT username, content FROM messages
+         WHERE thread_id = ?
+         ORDER BY id DESC LIMIT ?",
+    )
+    .bind(tid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    // Reverse to chronological order
+    Ok(rows.into_iter().rev().collect())
+}
+
+/// Get all active/idle sessions (for the summarizer background task).
+pub async fn get_active_sessions_for_summary(
+    pool: &SqlitePool,
+) -> Result<Vec<(i64, String, String)>, AppError> {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT thread_id, project, status FROM sessions
+         WHERE status IN ('active', 'idle')
+         ORDER BY last_active_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }

@@ -194,6 +194,8 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
         }
 
         crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
+        let _ =
+            crate::db::mark_summary_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await;
 
         let msg = match pr_url {
             Some(url) => format!("Session ended. PR created: {url}"),
