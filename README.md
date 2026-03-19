@@ -75,7 +75,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
 - **Git worktree isolation** -- optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
-- **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a GitHub PR via `gh` CLI if there are commits ahead of the default branch
+- **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a PR via `gh` CLI if there are commits ahead of the default branch. **Note:** auto-PR currently uses `gh` (GitHub CLI) only. For GitLab repositories, keep `auto_pr = false` and create merge requests manually or let Claude do it via Bash with `glab mr create`
 - **Co-authored commits** -- map Discord users to GitHub usernames/emails via config; collaborative sessions automatically add `Co-authored-by` trailers to every commit via a `prepare-commit-msg` git hook (worktree sessions) plus system prompt hints (all sessions)
 - Session timeout and automatic cleanup
 - stderr capture -- Claude process errors are logged and surfaced to Discord
@@ -440,6 +440,8 @@ Potential future features:
 - **File attachment support** -- Send files/images via Discord attachments for Claude to read
 - **Reaction-based approval UI** -- Discord button components instead of text replies for permission prompts and user questions; collaborative sessions could require quorum approval
 - **`/health` endpoint** -- HTTP health check for monitoring (lightweight Axum or Hyper)
+- **Context-aware sessions** -- Periodic background task (every N minutes) generates a compact context summary per session thread: files being worked on, touched function signatures, and a brief description of current work. All active/idle sessions on the same project share these summaries, so each session knows what the others are doing -- preventing conflicting edits and enabling coordinated parallel work across threads
+- **GitLab merge request support** -- Add `glab` CLI support alongside `gh` for auto-PR on GitLab repositories
 - **PR review integration** -- Post PR review comments from Discord; let participants approve/request changes via slash commands
 - **Session handoff** -- Transfer session ownership to another participant without ending it
 
