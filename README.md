@@ -49,7 +49,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - **Auto-join** -- authorized users typing in a session thread are automatically added as participants
 - **Participant management** -- `/participants`, `/sessionkick`, `/sessionban` commands for session membership
 - **Per-user message attribution** -- every message to Claude is tagged with the sender's identity
-- **Owner/participant roles** -- session creator has owner privileges; controls who can `/end` or `/sessionkick`
+- **Owner/participant roles** -- session creator has owner privileges; controls who can `/end`, `/sessionkick`, or `/handoff`
 - **Full audit trail** -- tool invocations logged to SQLite with user attribution, input JSON, result preview, error status, and duration
 - **Admin override** -- server admins can manage any session regardless of ownership
 
@@ -252,6 +252,7 @@ The `allowed_tools` list controls which tools Claude can use:
 | Command | Where | Description |
 |---------|-------|-------------|
 | `/participants` | Session thread | List all participants and their roles (ephemeral) |
+| `/handoff <user>` | Session thread | Transfer session ownership to another participant (owner/admin only, ephemeral) |
 | `/sessionkick <user>` | Session thread | Remove a participant (owner/admin only, ephemeral) |
 | `/sessionban <user>` | Session thread | Remove from session and revoke access (admin only, ephemeral) |
 
@@ -448,7 +449,6 @@ Potential future features:
 - **`/health` endpoint** -- HTTP health check for monitoring (lightweight Axum or Hyper)
 - **GitLab merge request support** -- Add `glab` CLI support alongside `gh` for auto-PR on GitLab repositories
 - **PR review integration** -- Post PR review comments from Discord; let participants approve/request changes via slash commands
-- **Session handoff** -- Transfer session ownership to another participant without ending it
 
 ## Related Projects
 

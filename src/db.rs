@@ -443,6 +443,48 @@ pub async fn get_participants(
         .collect())
 }
 
+/// Atomically transfer session ownership: update sessions.owner_id,
+/// demote old owner to 'participant', promote new owner to 'owner'.
+pub async fn transfer_ownership(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    old_owner_id: UserId,
+    new_owner_id: UserId,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    let old_uid = old_owner_id.get() as i64;
+    let new_uid = new_owner_id.get() as i64;
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query("UPDATE sessions SET owner_id = ? WHERE thread_id = ?")
+        .bind(new_uid)
+        .bind(tid)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "UPDATE session_participants SET role = 'participant'
+         WHERE session_thread_id = ? AND user_id = ?",
+    )
+    .bind(tid)
+    .bind(old_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE session_participants SET role = 'owner'
+         WHERE session_thread_id = ? AND user_id = ?",
+    )
+    .bind(tid)
+    .bind(new_uid)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn remove_participant(
     pool: &SqlitePool,
     thread_id: ThreadId,

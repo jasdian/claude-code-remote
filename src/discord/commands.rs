@@ -643,6 +643,69 @@ pub async fn sessionkick(
     Ok(())
 }
 
+/// Transfer session ownership to another participant.
+#[poise::command(slash_command)]
+pub async fn handoff(
+    ctx: Context<'_>,
+    #[description = "User to transfer ownership to"] user: serenity::User,
+) -> Result<(), AppError> {
+    ctx.defer_ephemeral().await?;
+    check_auth(&ctx).await?;
+    let thread_id = ThreadId::from(ctx.channel_id());
+    let caller_id = UserId::from(ctx.author().id);
+
+    let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
+    let Some(session) = session else {
+        ctx.say("No active session in this thread.").await?;
+        return Ok(());
+    };
+
+    // Only owner or admin can transfer
+    let is_admin = ctx
+        .data()
+        .config
+        .auth
+        .admins
+        .contains(&ctx.author().id.get());
+    if session.owner_id != caller_id && !is_admin {
+        ctx.say("Only the session owner or an admin can transfer ownership.")
+            .await?;
+        return Ok(());
+    }
+
+    let target_id = UserId::from(user.id);
+
+    // Already owner?
+    if target_id == session.owner_id {
+        ctx.say(format!("**{}** is already the owner.", user.name))
+            .await?;
+        return Ok(());
+    }
+
+    // Must be a participant
+    if !crate::db::is_participant(&ctx.data().db, thread_id, target_id).await? {
+        ctx.say(format!(
+            "**{}** is not a participant. They must send a message first to join.",
+            user.name
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    crate::db::transfer_ownership(&ctx.data().db, thread_id, session.owner_id, target_id).await?;
+
+    ctx.say(format!("Ownership transferred to **{}**.", user.name))
+        .await?;
+    // Visible notification in the thread
+    ctx.channel_id()
+        .say(
+            ctx.http(),
+            format!("Session ownership transferred to <@{}>.", user.id.get()),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Ban a user from session and revoke their dynamic access.
 #[poise::command(slash_command, rename = "sessionban")]
 pub async fn sessionban(

@@ -30,6 +30,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
                 commands::audit(),
                 commands::participants(),
                 commands::sessionkick(),
+                commands::handoff(),
                 commands::sessionban(),
             ],
             event_handler: |ctx, event, _fw_ctx, state| {
