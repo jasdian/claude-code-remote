@@ -7,6 +7,8 @@ use crate::AppState;
 use crate::domain::{self, SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 
+use super::is_affirmative;
+
 /// Best-effort reaction — log on failure but never abort the handler.
 #[inline]
 async fn try_react(ctx: &serenity::Context, msg: &serenity::Message, emoji: &str) {
@@ -279,15 +281,6 @@ pub async fn handle_message(
     }
 
     Ok(())
-}
-
-/// Check if the user's reply is an affirmative ("yes", "y", "yeah", etc.)
-#[inline]
-fn is_affirmative(text: &str) -> bool {
-    matches!(
-        text.trim().to_ascii_lowercase().as_str(),
-        "yes" | "y" | "yeah" | "yep" | "yup" | "sure" | "ok" | "okay"
-    )
 }
 
 /// Delete old session row and start a fresh session in the same thread.

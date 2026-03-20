@@ -3,4 +3,6 @@ config.toml
 data.db*
 .claude-worktrees/
 .claude/worktrees/
-scripts/deploy-remote.sh
+scripts/deploy-remote*.sh
+!scripts/deploy-remote.example.sh
+config/*

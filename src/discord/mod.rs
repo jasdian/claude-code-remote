@@ -9,6 +9,15 @@ use poise::serenity_prelude as serenity;
 use crate::AppState;
 use crate::error::AppError;
 
+/// Check if the user's reply is an affirmative ("yes", "y", "yeah", etc.)
+#[inline]
+pub(crate) fn is_affirmative(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "yes" | "y" | "yeah" | "yep" | "yup" | "sure" | "ok" | "okay"
+    )
+}
+
 pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
     let token = state.config.discord.token.clone();
     let shutdown = state.shutdown.clone();
@@ -19,6 +28,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
                 commands::claude(),
                 commands::end(),
                 commands::interrupt(),
+                commands::projects(),
                 commands::sessions(),
                 commands::optin(),
                 commands::optout(),

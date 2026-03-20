@@ -82,12 +82,26 @@ mkdir -p ${REMOTE_DIR}/.claude
 chown ${REMOTE_USER}:${REMOTE_USER} ${REMOTE_DIR}/.claude
 chmod 700 ${REMOTE_DIR}/.claude
 if [ ! -f ${REMOTE_DIR}/.local/bin/claude ]; then
-    echo '    Installing Claude Code CLI...'
-    su -s /bin/bash ${REMOTE_USER} -c 'curl -fsSL https://claude.ai/install.sh | bash'
+    echo '    Claude CLI not found, will install after setup.'
 else
     echo '    Claude CLI already installed'
 fi
 "
+
+# Download install script locally and SCP to remote (avoids remote rate limits)
+NEEDS_CLI=$($SSH_CMD "[ -f ${REMOTE_DIR}/.local/bin/claude ] && echo no || echo yes")
+if [ "$NEEDS_CLI" = "yes" ]; then
+    echo "==> Downloading Claude Code install script locally..."
+    INSTALL_SCRIPT=$(mktemp /tmp/claude-install-XXXXXX.sh)
+    curl -fsSL https://claude.ai/install.sh -o "$INSTALL_SCRIPT"
+
+    echo "==> Copying install script to remote..."
+    $SCP_CMD "$INSTALL_SCRIPT" "${SERVER}:${REMOTE_DIR}/claude-install.sh"
+    rm -f "$INSTALL_SCRIPT"
+
+    echo "==> Running install script on remote..."
+    $SSH_CMD "chown ${REMOTE_USER}:${REMOTE_USER} ${REMOTE_DIR}/claude-install.sh && chmod 755 ${REMOTE_DIR}/claude-install.sh && su -s /bin/bash ${REMOTE_USER} -c '${REMOTE_DIR}/claude-install.sh' && rm -f ${REMOTE_DIR}/claude-install.sh"
+fi
 
 if [ "$SETUP_ONLY" = true ]; then
     echo "==> Setup-only mode: done."

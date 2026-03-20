@@ -121,10 +121,23 @@ fn default_binary() -> String {
     "claude".into()
 }
 fn default_allowed_tools() -> Vec<String> {
-    ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
-        .iter()
-        .map(|s| (*s).to_string())
-        .collect()
+    [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+        "Agent",
+        "ToolSearch",
+        "Skill",
+        "NotebookEdit",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect()
 }
 const fn default_max_sessions() -> usize {
     3

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData};
+use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData, ToolInputEntry};
 
 /// Parsed output from a single stdout line.
 pub struct ParsedLine {
@@ -63,11 +63,13 @@ pub fn parse_stream_line(line: &str) -> ParsedLine {
                 _ => empty,
             }
         }
-        // With --include-partial-messages, assistant events duplicate the text
-        // already received via stream_event deltas. Skip to avoid double output.
-        // Tool use blocks in assistant events are also duplicated by
-        // stream_event/content_block_start, so we can safely skip entirely.
-        "assistant" => empty,
+        // With --include-partial-messages, assistant events duplicate text already
+        // received via stream_event deltas. We skip text, but extract tool_use
+        // input_json (which is complete here but empty on content_block_start).
+        "assistant" => ParsedLine {
+            events: parse_assistant_tool_inputs(&v).into_iter().collect(),
+            result_text: None,
+        },
         "result" => ParsedLine {
             events: SmallVec::from_elem(ClaudeEvent::Done, 1),
             result_text: parse_result(&v),
@@ -162,6 +164,40 @@ fn parse_user(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
         .collect()
 }
 
+/// Extract tool_use input_json from "assistant" events.
+/// With --include-partial-messages, text and tool events are already handled by
+/// stream_event deltas. But assistant events have the *complete* input objects
+/// (content_block_start has "input": {}). We extract these for DB backfill.
+/// P2: filter_map chain for single-pass extraction.
+#[inline]
+fn parse_assistant_tool_inputs(v: &serde_json::Value) -> Option<ClaudeEvent> {
+    let content = v.get("message")?.get("content")?.as_array()?;
+    let entries: SmallVec<[ToolInputEntry; 2]> = content
+        .iter()
+        .filter_map(|block| {
+            if block.get("type")?.as_str()? != "tool_use" {
+                return None;
+            }
+            let name = block.get("name")?.as_str()?;
+            let input = block.get("input")?;
+            // Skip empty input objects (defensive)
+            if input.as_object().is_some_and(|m| m.is_empty()) {
+                return None;
+            }
+            Some(ToolInputEntry {
+                tool: Arc::from(name),
+                input_json: Arc::from(input.to_string().as_str()),
+            })
+        })
+        .collect();
+
+    if entries.is_empty() {
+        None
+    } else {
+        Some(ClaudeEvent::ToolInputBackfill(Box::new(entries)))
+    }
+}
+
 /// Parse the "assistant" event from Claude CLI.
 /// Format: {"type":"assistant","message":{"content":[{"type":"text","text":"..."},{"type":"tool_use","name":"Bash",...}]}}
 /// P2: fold for (events, text_buf) accumulation in a single pass.
@@ -250,8 +286,8 @@ fn parse_block_start(v: &serde_json::Value) -> Option<ClaudeEvent> {
     match block_type {
         "tool_use" => {
             let tool = block.get("name")?.as_str()?;
-            let preview = extract_tool_preview(tool, v);
-            let input_json = extract_input_json(v);
+            let preview = extract_tool_preview(tool, block);
+            let input_json = extract_input_json(block);
             Some(ClaudeEvent::ToolUse {
                 tool: Arc::from(tool),
                 input_preview: Arc::from(preview.as_str()),
@@ -415,11 +451,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_assistant_skipped_with_partial_messages() {
-        // With --include-partial-messages, assistant events are skipped to avoid
-        // duplicating content already received via stream_event deltas.
+    fn parse_assistant_text_only_no_events() {
+        // Text-only assistant events produce no events (text already streamed via deltas)
         let line =
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
+        let parsed = parse_stream_line(line);
+        assert!(parsed.events.is_empty());
+    }
+
+    #[test]
+    fn parse_assistant_extracts_tool_inputs() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"reading"},{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/src/main.rs"}},{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/src/lib.rs","old_string":"a","new_string":"b"}}]}}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            ClaudeEvent::ToolInputBackfill(entries) => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(&*entries[0].tool, "Read");
+                assert!(entries[0].input_json.contains("file_path"));
+                assert_eq!(&*entries[1].tool, "Edit");
+                assert!(entries[1].input_json.contains("old_string"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_assistant_empty_input_skipped() {
+        // content_block_start-style empty input should not produce backfill entries
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{}}]}}"#;
         let parsed = parse_stream_line(line);
         assert!(parsed.events.is_empty());
     }

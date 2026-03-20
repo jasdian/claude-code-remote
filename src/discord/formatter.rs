@@ -208,6 +208,8 @@ async fn stream_events(
     // P3: SmallVec for typically-small collections (1-2 concurrent tool calls)
     let mut tool_timers: ToolTimers = SmallVec::new();
     let mut latest_audit_id: AuditIds = SmallVec::new();
+    // Ordered list for input_json backfill — preserves all entries (no dedup by tool name)
+    let mut backfill_ids: SmallVec<[(Arc<str>, i64); 4]> = SmallVec::new();
 
     loop {
         tokio::select! {
@@ -245,6 +247,7 @@ async fn stream_events(
                                 // Remove previous entry for same tool, then push new
                                 latest_audit_id.retain(|(t, _)| t != &tool);
                                 latest_audit_id.push((Arc::clone(&tool), id));
+                                backfill_ids.push((Arc::clone(&tool), id));
                                 if input_preview.is_empty() {
                                     format!("_Using {} ..._ `#{id}`", &*tool)
                                 } else {
@@ -298,6 +301,19 @@ async fn stream_events(
                                 &format!("_{} {status}_", &*tool)).await;
                         }
                     }
+                    Some(ClaudeEvent::ToolInputBackfill(entries)) => {
+                        // Backfill input_json from assistant event into DB rows.
+                        // Match by tool name in insertion order; remove() consumes
+                        // the match so repeated same-name tools resolve correctly.
+                        for entry in entries.iter() {
+                            if let Some(pos) = backfill_ids.iter().position(|(t, _)| t == &entry.tool) {
+                                let (_, audit_id) = backfill_ids.remove(pos);
+                                let _ = crate::db::backfill_tool_input_json(
+                                    &state.db, audit_id, &entry.input_json,
+                                ).await;
+                            }
+                        }
+                    }
                     Some(ClaudeEvent::ControlRequest(cr)) => {
                         if !buffer.is_empty() {
                             let chunk = take_all(&mut buffer);
@@ -312,6 +328,7 @@ async fn stream_events(
                             tool_timers.push((id, Instant::now()));
                             latest_audit_id.retain(|(t, _)| t != &cr.tool_name);
                             latest_audit_id.push((Arc::clone(&cr.tool_name), id));
+                            backfill_ids.push((Arc::clone(&cr.tool_name), id));
                         }
 
                         // Mention the user who triggered this tool call, falling back to owner
@@ -340,16 +357,27 @@ async fn stream_events(
 
                         send_message(http, channel_id, &display).await;
 
-                        // Spawn forwarding task to route user reply to stdin
+                        // Spawn forwarding task to route user reply to stdin (120s timeout → auto-deny)
                         if let Some(stdin_tx) = stdin_tx {
                             let request_id = Arc::clone(&cr.request_id);
                             let tool_name = Arc::clone(&cr.tool_name);
                             tokio::spawn(async move {
-                                if let Ok(_user_reply) = reply_rx.await {
-                                    let response = build_control_response(&request_id, &tool_name);
-                                    tracing::info!(%request_id, %tool_name, "forwarding control_response");
-                                    let _ = stdin_tx.send(response).await;
-                                }
+                                let result = tokio::time::timeout(
+                                    std::time::Duration::from_secs(120),
+                                    reply_rx,
+                                ).await;
+                                let response = match result {
+                                    Ok(Ok(ref reply)) if tool_name.as_ref() == "AskUserQuestion" =>
+                                        build_ask_response(&request_id, reply),
+                                    Ok(Ok(ref reply)) if super::is_affirmative(reply) =>
+                                        build_control_response(&request_id, &tool_name),
+                                    _ => {
+                                        tracing::warn!(%request_id, %tool_name, "control_request denied (timeout or negative)");
+                                        build_deny_response(&request_id, &tool_name)
+                                    }
+                                };
+                                tracing::info!(%request_id, %tool_name, "forwarding control_response");
+                                let _ = stdin_tx.send(response).await;
                             });
                         }
                     }
@@ -460,6 +488,36 @@ fn build_control_response(request_id: &str, _tool_name: &str) -> String {
             "response": {
                 "behavior": "allow",
             }
+        }
+    })
+    .to_string()
+}
+
+/// Build a control_response JSON that denies a tool permission request.
+#[inline]
+fn build_deny_response(request_id: &str, _tool_name: &str) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": {
+                "behavior": "deny",
+            }
+        }
+    })
+    .to_string()
+}
+
+/// Build a control_response JSON for an AskUserQuestion reply (freeform text).
+#[inline]
+fn build_ask_response(request_id: &str, user_reply: &str) -> String {
+    serde_json::json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": request_id,
+            "response": user_reply
         }
     })
     .to_string()

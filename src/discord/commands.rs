@@ -246,6 +246,77 @@ pub async fn interrupt(
     Ok(())
 }
 
+/// List git repositories discoverable as sibling directories of default_cwd.
+#[poise::command(slash_command)]
+pub async fn projects(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_auth(&ctx).await?;
+
+    let config = &ctx.data().config.claude;
+    let default_cwd = config.default_cwd.as_ref();
+
+    // P2: early return if no parent directory
+    let parent = Path::new(default_cwd)
+        .parent()
+        .ok_or_else(|| AppError::config("default_cwd has no parent directory"))?;
+
+    // P4: async directory reading
+    let mut entries = tokio::fs::read_dir(parent)
+        .await
+        .map_err(|e| AppError::config(&format!("cannot read {}: {e}", parent.display())))?;
+
+    // P2: collect git repos in a single pass via filter_map logic
+    let mut repos: Vec<(String, bool)> = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::config(&format!("reading directory entry: {e}")))?
+    {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let git_dir = path.join(".git");
+        // P4: async metadata check
+        let is_git = tokio::fs::metadata(&git_dir)
+            .await
+            .is_ok_and(|m| m.is_dir());
+        if !is_git {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Check if this project has explicit config
+        let has_config = config.projects.contains_key(name.as_str());
+        repos.push((name, has_config));
+    }
+
+    if repos.is_empty() {
+        ctx.say(format!(
+            "No git repositories found in `{}`.",
+            parent.display()
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    repos.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+    // P2: fold into output string
+    let mut out = format!(
+        "**Git projects in `{}`** ({} found)\n",
+        parent.display(),
+        repos.len()
+    );
+    for (name, has_config) in &repos {
+        let marker = if *has_config { " ⚙" } else { "" };
+        out.push_str(&format!("• `{name}`{marker}\n"));
+    }
+    out.push_str("\n_⚙ = has explicit config in `[claude.projects]`_");
+
+    send_ephemeral_chunked(&ctx, &out).await?;
+    Ok(())
+}
+
 #[poise::command(slash_command)]
 pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
@@ -485,15 +556,33 @@ pub async fn audit(
     check_admin(&ctx)?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
 
-    // Detail mode: show full input_json for a specific ID (latest if omitted)
+    // Detail mode: show full input_json for specific ID(s)
     if detail.unwrap_or(false) {
-        let target_id = match id {
-            Some(i) => i,
-            None => crate::db::get_latest_tool_use_id(&ctx.data().db)
-                .await?
-                .unwrap_or(0),
+        if let Some(target_id) = id {
+            return audit_detail(&ctx, target_id).await;
+        }
+        // No specific ID: show detail for last N entries (thread-scoped if in session thread)
+        let n = count.unwrap_or(1).clamp(1, 10);
+        let in_thread = crate::db::get_session_by_thread(&ctx.data().db, thread_id)
+            .await?
+            .is_some();
+        let rows = if in_thread {
+            crate::db::get_tool_uses(&ctx.data().db, thread_id, None, n).await?
+        } else {
+            crate::db::get_tool_uses_global(&ctx.data().db, n).await?
         };
-        return audit_detail(&ctx, target_id).await;
+        let mut out = String::with_capacity(2048);
+        for row in &rows {
+            if let Some(d) = crate::db::get_tool_use_detail(&ctx.data().db, row.id).await? {
+                format_audit_detail(&mut out, &d);
+            }
+        }
+        if out.is_empty() {
+            ctx.say("No tool uses found.").await?;
+        } else {
+            send_ephemeral_chunked(&ctx, &out).await?;
+        }
+        return Ok(());
     }
 
     let n = count.unwrap_or(10).clamp(1, 50);
@@ -558,35 +647,43 @@ async fn audit_detail(ctx: &Context<'_>, id: i64) -> Result<(), AppError> {
         return Ok(());
     };
 
+    let mut out = String::with_capacity(2048);
+    format_audit_detail(&mut out, &d);
+    send_ephemeral_chunked(ctx, &out).await?;
+    Ok(())
+}
+
+/// Append formatted audit detail for a single tool use to a buffer (P3: buffer reuse).
+fn format_audit_detail(buf: &mut String, d: &crate::db::ToolUseDetail) {
+    use std::fmt::Write;
     let error_marker = if d.is_error { " ❌" } else { "" };
     let duration_str = d
         .duration_ms
         .map(|ms| format!(" ({ms}ms)"))
         .unwrap_or_default();
 
-    let mut out = format!(
-        "`#{}` **{}**{error_marker}{duration_str} — {}\n",
+    let _ = writeln!(
+        buf,
+        "`#{}` **{}**{error_marker}{duration_str} — {}",
         d.id, d.tool, d.created_at
     );
 
     if !d.input_json.is_empty() {
-        out.push_str("\n**Input:**\n```json\n");
-        out.push_str(&d.input_json);
-        out.push_str("\n```\n");
+        buf.push_str("\n**Input:**\n```json\n");
+        buf.push_str(&d.input_json);
+        buf.push_str("\n```\n");
     } else if !d.input_preview.is_empty() {
-        out.push_str("\n**Input:** `");
-        out.push_str(&d.input_preview);
-        out.push_str("`\n");
+        buf.push_str("\n**Input:** `");
+        buf.push_str(&d.input_preview);
+        buf.push_str("`\n");
     }
 
     if !d.result_preview.is_empty() {
-        out.push_str("\n**Result:**\n```\n");
-        out.push_str(&d.result_preview);
-        out.push_str("\n```\n");
+        buf.push_str("\n**Result:**\n```\n");
+        buf.push_str(&d.result_preview);
+        buf.push_str("\n```\n");
     }
-
-    send_ephemeral_chunked(ctx, &out).await?;
-    Ok(())
+    buf.push('\n');
 }
 
 // --- Multi-user session commands ---

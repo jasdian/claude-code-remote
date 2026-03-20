@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
+use smallvec::SmallVec;
 use uuid::Uuid;
 
 use crate::config::UserIdentity;
@@ -321,6 +322,13 @@ fn extract_meaningful_stderr(stderr: &str) -> &str {
 
 // ClaudeEvent: compact enum (P3)
 
+/// A single tool_use input extracted from an assistant event.
+#[derive(Debug, Clone)]
+pub struct ToolInputEntry {
+    pub tool: Arc<str>,
+    pub input_json: Arc<str>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClaudeEvent {
     TextDelta(Arc<str>),
@@ -334,6 +342,9 @@ pub enum ClaudeEvent {
         is_error: bool,
         output_preview: Arc<str>,
     },
+    /// Backfill tool input_json from `assistant` event (complete input objects).
+    /// P3: Boxed SmallVec to keep enum compact.
+    ToolInputBackfill(Box<SmallVec<[ToolInputEntry; 2]>>),
     /// Claude CLI `control_request` — permission prompt or AskUserQuestion.
     /// P3: Boxed to keep enum size compact (ControlRequest is rare vs TextDelta).
     ControlRequest(Box<ControlRequestData>),

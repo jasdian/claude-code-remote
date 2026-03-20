@@ -579,6 +579,22 @@ pub async fn log_tool_use(
     Ok(id)
 }
 
+/// Backfill input_json from assistant event (only overwrites empty values).
+pub async fn backfill_tool_input_json(
+    pool: &SqlitePool,
+    tool_use_id: i64,
+    input_json: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        "UPDATE tool_uses SET input_json = ? WHERE id = ? AND (input_json IS NULL OR input_json = '' OR input_json = '{}')",
+    )
+    .bind(input_json)
+    .bind(tool_use_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn update_tool_result(
     pool: &SqlitePool,
     tool_use_id: i64,
