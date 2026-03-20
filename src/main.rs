@@ -73,16 +73,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 _ = interval.tick() => {
-                    let reaped = reaper_state.session_manager.reap_expired().await;
-                    if !reaped.is_empty() {
-                        tracing::info!(count = reaped.len(), "reaped expired sessions");
-                        for tid in reaped {
-                            let _ = claude_crew::db::update_session_status(
-                                &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
-                            ).await;
-                            let _ = claude_crew::db::mark_summary_status(
-                                &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
-                            ).await;
+                    // Expire idle sessions that haven't been used within timeout.
+                    // Active sessions (Claude running) are never auto-expired.
+                    let timeout_mins = reaper_state.config.claude.session_timeout_minutes;
+                    if let Ok(stale) = claude_crew::db::find_stale_idle_sessions(
+                        &reaper_state.db, timeout_mins,
+                    ).await {
+                        if !stale.is_empty() {
+                            tracing::info!(count = stale.len(), "expiring stale idle sessions");
+                            for (tid, worktree_path) in stale {
+                                let _ = claude_crew::db::update_session_status(
+                                    &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
+                                ).await;
+                                let _ = claude_crew::db::mark_summary_status(
+                                    &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
+                                ).await;
+                                if let Some(ref wt) = worktree_path {
+                                    claude_crew::claude::worktree::remove_worktree(
+                                        std::path::Path::new(wt), false,
+                                    ).await;
+                                }
+                            }
                         }
                     }
                 }

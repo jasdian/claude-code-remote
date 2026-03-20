@@ -7,14 +7,12 @@ use crate::error::AppError;
 use dashmap::DashMap;
 use smallvec::SmallVec;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::Instant;
 
 use super::process::ClaudeProcessHandle;
 
 struct ActiveSession {
     handle: ClaudeProcessHandle,
     stdin_tx: mpsc::Sender<String>,
-    started_at: Instant,
     claude_session_id: Option<ClaudeSessionId>,
     project_cwd: PathBuf,
     worktree_path: Option<PathBuf>,
@@ -25,8 +23,6 @@ pub struct SessionManager {
     pending: DashMap<ThreadId, Vec<UserMessage>>,
     /// Oneshot channels for routing user replies to waiting control_requests.
     reply_waiters: DashMap<ThreadId, oneshot::Sender<String>>,
-    /// Original prompts awaiting "start new session?" confirmation, scoped to the requesting user.
-    confirm_new: DashMap<ThreadId, (UserId, String)>,
     /// Tracks which user triggered the current Claude run (for tool audit attribution).
     current_user: DashMap<ThreadId, (UserId, Arc<str>)>,
     config: Arc<AppConfig>,
@@ -38,7 +34,6 @@ impl SessionManager {
             active: DashMap::with_capacity(config.claude.max_sessions),
             pending: DashMap::new(),
             reply_waiters: DashMap::new(),
-            confirm_new: DashMap::new(),
             current_user: DashMap::new(),
             config,
         }
@@ -73,7 +68,6 @@ impl SessionManager {
             ActiveSession {
                 handle,
                 stdin_tx,
-                started_at: Instant::now(),
                 claude_session_id: None,
                 project_cwd: cwd,
                 worktree_path,
@@ -138,27 +132,6 @@ impl SessionManager {
         self.reply_waiters.contains_key(&thread_id)
     }
 
-    /// Store an original prompt awaiting "new session?" confirmation, scoped to user.
-    pub fn set_confirm_new(&self, thread_id: ThreadId, user_id: UserId, prompt: String) {
-        self.confirm_new.insert(thread_id, (user_id, prompt));
-    }
-
-    /// Take the stored prompt if the confirming user matches the original requester.
-    pub fn take_confirm_new(&self, thread_id: ThreadId, user_id: UserId) -> Option<String> {
-        // Only let the same user who initiated the confirmation consume it
-        if let Some(entry) = self.confirm_new.get(&thread_id)
-            && entry.0 == user_id
-        {
-            return self.confirm_new.remove(&thread_id).map(|(_, (_, p))| p);
-        }
-        None
-    }
-
-    /// Remove a stale confirmation (timeout cleanup).
-    pub fn remove_confirm_new(&self, thread_id: ThreadId) {
-        self.confirm_new.remove(&thread_id);
-    }
-
     /// Set which user triggered the current Claude run (for tool audit attribution).
     pub fn set_current_user(&self, thread_id: ThreadId, user_id: UserId, username: Arc<str>) {
         self.current_user.insert(thread_id, (user_id, username));
@@ -196,29 +169,5 @@ impl SessionManager {
                 tracing::info!(?tid, "killed session on shutdown");
             }
         }
-    }
-
-    /// Kill sessions older than timeout. Returns reaped thread IDs for DB cleanup.
-    pub async fn reap_expired(&self) -> SmallVec<[ThreadId; 4]> {
-        let timeout =
-            std::time::Duration::from_secs(self.config.claude.session_timeout_minutes * 60);
-
-        let expired: SmallVec<[ThreadId; 4]> = self
-            .active
-            .iter()
-            .filter(|entry| entry.started_at.elapsed() > timeout)
-            .map(|entry| *entry.key())
-            .collect();
-
-        for tid in &expired {
-            if let Some((_, session)) = self.active.remove(tid) {
-                let _ = session.handle.kill().await;
-                if let Some(ref wt) = session.worktree_path {
-                    super::worktree::remove_worktree(wt, false).await;
-                }
-                tracing::info!(?tid, "reaped expired session");
-            }
-        }
-        expired
     }
 }

@@ -89,6 +89,13 @@ pub async fn run_claude(
 
     if config.dangerously_skip_permissions {
         cmd.arg("--dangerously-skip-permissions");
+    } else {
+        // Route permission prompts through stdin/stdout as control_request events.
+        // Without this, tools not in --allowedTools are silently auto-denied.
+        cmd.arg("--permission-prompt-tool")
+            .arg("stdio")
+            .arg("--permission-mode")
+            .arg("default");
     }
 
     if !allowed_tools.is_empty() {

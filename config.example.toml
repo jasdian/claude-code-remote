@@ -6,8 +6,8 @@ guild_id = 123456789012345678
 binary = "claude"
 default_cwd = "/home/you/projects"
 
-# Tools auto-approved in headless mode. Tools NOT listed here are auto-denied.
-# AskUserQuestion is handled interactively via Discord (not listed here).
+# Tools auto-approved in headless mode. Tools NOT listed here trigger a
+# permission prompt via control_request (forwarded to Discord for approval).
 allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Agent", "ToolSearch", "Skill", "NotebookEdit"]
 
 max_sessions = 3

@@ -116,9 +116,10 @@ Two-phase TOML loading: `RawAppConfig` (serde Strings) -> `AppConfig` (validated
 
 ### Permission Model
 
-- `allowed_tools` in config → passed as `--allowedTools` (auto-approved in headless `-p` mode)
-- `dangerously_skip_permissions` in config → `--dangerously-skip-permissions` flag (bypasses all checks)
-- Tools not in `allowed_tools` are denied (fail-closed in `-p` mode)
+- `allowed_tools` in config → passed as `--allowedTools` (auto-approved, no prompt)
+- `--permission-prompt-tool stdio --permission-mode default` → routes unlisted tool requests through stdin/stdout as `control_request` / `control_response` JSON events (forwarded to Discord for user approval)
+- `dangerously_skip_permissions` in config → `--dangerously-skip-permissions` flag (bypasses all checks, skips `--permission-prompt-tool`)
+- SDK evaluation order: hooks → deny rules → permission mode → allow rules → permission-prompt-tool (stdio)
 
 ### Session Lifecycle
 

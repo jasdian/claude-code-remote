@@ -369,6 +369,25 @@ pub async fn update_session_status(
     Ok(())
 }
 
+/// Find idle sessions whose last_active_at is older than `timeout_minutes`.
+pub async fn find_stale_idle_sessions(
+    pool: &SqlitePool,
+    timeout_minutes: u64,
+) -> Result<Vec<(ThreadId, Option<String>)>, AppError> {
+    let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT thread_id, worktree_path FROM sessions
+         WHERE status = 'idle'
+         AND last_active_at < datetime('now', ? || ' minutes')",
+    )
+    .bind(-(timeout_minutes as i64))
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(tid, wt)| (ThreadId::new(tid as u64), wt))
+        .collect())
+}
+
 pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(), AppError> {
     let tid = thread_id.get() as i64;
     sqlx::query(&format!(

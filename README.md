@@ -83,7 +83,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 
 **Security**
 - Discord user/role allowlist
-- Per-project tool restrictions (`--allowedTools` auto-approves listed tools, denies others)
+- Per-project tool restrictions (`--allowedTools` auto-approves listed tools; unlisted tools prompt via `--permission-prompt-tool stdio`)
 - No secrets in Discord -- Claude runs locally on your machine
 
 **Operations**
@@ -187,7 +187,7 @@ guild_id = 123456789012345678  # Your server ID
 [claude]
 binary = "claude"                                    # Path to claude CLI
 default_cwd = "/home/you/projects"                   # Default working directory
-allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+allowed_tools = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebSearch", "WebFetch", "Agent", "ToolSearch", "Skill", "NotebookEdit"]
 max_sessions = 3                                     # Max concurrent sessions
 session_timeout_minutes = 30                         # Auto-kill after inactivity
 # system_prompt = "Keep responses concise."          # Optional system prompt
@@ -225,9 +225,11 @@ format = "pretty"                                    # pretty or json
 
 ### Tool Permissions
 
-The `allowed_tools` list controls which tools Claude can use:
-- **Listed tools are auto-approved** -- no permission prompt needed
-- **Unlisted tools trigger a permission prompt** -- the bot displays the request in Discord with an @mention, and the user can reply to approve or deny
+The bot uses `--permission-prompt-tool stdio --permission-mode default` to route all permission decisions through Discord:
+
+- **Listed tools (`allowed_tools`) are auto-approved** -- no prompt needed
+- **Unlisted tools trigger a `control_request`** -- the bot displays the permission request in Discord with an @mention, and the user can reply to approve or deny
+- **`AskUserQuestion`** -- Claude's clarifying questions are forwarded to Discord; your freeform reply is sent back (not just yes/no)
 - **Permission timeout** -- if no reply within 120 seconds, the request is auto-denied
 - Set `dangerously_skip_permissions = true` to bypass all permission checks (use only in trusted environments)
 
@@ -448,6 +450,7 @@ Potential future features:
 - **`/health` endpoint** -- HTTP health check for monitoring (lightweight Axum or Hyper)
 - **GitLab merge request support** -- Add `glab` CLI support alongside `gh` for auto-PR on GitLab repositories
 - **PR review integration** -- Post PR review comments from Discord; let participants approve/request changes via slash commands
+- **Comprehensive test suite for CI/CD** -- End-to-end tests exercising both the Claude Code CLI integration (stream-json parsing, control_request/control_response protocol, permission flows) and the Discord layer (slash commands, thread lifecycle, ephemeral messages, reply routing)
 
 ## Related Projects
 

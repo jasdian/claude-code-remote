@@ -361,14 +361,21 @@ async fn stream_events(
                         if let Some(stdin_tx) = stdin_tx {
                             let request_id = Arc::clone(&cr.request_id);
                             let tool_name = Arc::clone(&cr.tool_name);
+                            let input_json = Arc::clone(&cr.input_json);
                             tokio::spawn(async move {
                                 let result = tokio::time::timeout(
                                     std::time::Duration::from_secs(120),
                                     reply_rx,
                                 ).await;
                                 let response = match result {
-                                    Ok(Ok(ref reply)) if tool_name.as_ref() == "AskUserQuestion" =>
-                                        build_ask_response(&request_id, reply),
+                                    Ok(Ok(ref reply)) if tool_name.as_ref() == "AskUserQuestion" => {
+                                        if super::is_negative(reply) {
+                                            tracing::warn!(%request_id, %tool_name, "AskUserQuestion denied by user");
+                                            build_deny_response(&request_id, &tool_name)
+                                        } else {
+                                            build_ask_response(&request_id, &input_json, reply)
+                                        }
+                                    }
                                     Ok(Ok(ref reply)) if super::is_affirmative(reply) =>
                                         build_control_response(&request_id, &tool_name),
                                     _ => {
@@ -509,15 +516,51 @@ fn build_deny_response(request_id: &str, _tool_name: &str) -> String {
     .to_string()
 }
 
-/// Build a control_response JSON for an AskUserQuestion reply (freeform text).
+/// Build a control_response JSON for an AskUserQuestion reply.
+/// The SDK expects `behavior: "allow"` with `updatedInput` containing the original
+/// questions array plus an answers mapping (question text → user's reply).
 #[inline]
-fn build_ask_response(request_id: &str, user_reply: &str) -> String {
+fn build_ask_response(request_id: &str, input_json: &str, user_reply: &str) -> String {
+    // Parse the original input to extract questions
+    let input: serde_json::Value =
+        serde_json::from_str(input_json).unwrap_or(serde_json::json!({}));
+
+    // Extract the question text from the first question (used as the answers key)
+    let question_text = input
+        .get("questions")
+        .and_then(|qs| qs.as_array())
+        .and_then(|qs| qs.first())
+        .and_then(|q| q.get("question"))
+        .and_then(|q| q.as_str())
+        .unwrap_or("");
+
+    // Build answers: map each question text → user's reply
+    let mut answers = serde_json::Map::new();
+    if !question_text.is_empty() {
+        answers.insert(
+            question_text.to_string(),
+            serde_json::Value::String(user_reply.to_string()),
+        );
+    }
+
+    // Pass through original questions array
+    let questions = input
+        .get("questions")
+        .cloned()
+        .unwrap_or(serde_json::json!([]));
+
     serde_json::json!({
         "type": "control_response",
         "response": {
             "subtype": "success",
             "request_id": request_id,
-            "response": user_reply
+            "response": {
+                "behavior": "allow",
+                "updatedInput": {
+                    "questions": questions,
+                    "answers": answers
+                }
+            }
         }
     })
     .to_string()

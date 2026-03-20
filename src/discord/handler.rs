@@ -7,8 +7,6 @@ use crate::AppState;
 use crate::domain::{self, SessionStatus, ThreadId, UserId, UserMessage};
 use crate::error::AppError;
 
-use super::is_affirmative;
-
 /// Best-effort reaction — log on failure but never abort the handler.
 #[inline]
 async fn try_react(ctx: &serenity::Context, msg: &serenity::Message, emoji: &str) {
@@ -19,9 +17,6 @@ async fn try_react(ctx: &serenity::Context, msg: &serenity::Message, emoji: &str
         tracing::warn!(emoji, error = %e, "failed to add reaction (missing Add Reactions permission?)");
     }
 }
-
-/// Timeout for "start new session?" confirmation (seconds).
-const CONFIRM_TIMEOUT_SECS: u64 = 60;
 
 /// Check if a channel is a DM
 fn is_dm(msg: &serenity::Message) -> bool {
@@ -211,19 +206,6 @@ pub async fn handle_message(
         .await;
     }
 
-    // Check for pending "start new session?" confirmation (user-scoped)
-    if let Some(original_prompt) = state.session_manager.take_confirm_new(thread_id, user_id) {
-        if is_affirmative(&prompt) {
-            tracing::info!(?thread_id, "user confirmed new session in thread");
-            return start_new_in_thread(ctx, msg, state, thread_id, user_id, &original_prompt)
-                .await;
-        }
-        // Not affirmative — discard confirmation, ignore message
-        tracing::debug!(?thread_id, "user declined new session");
-        try_react(ctx, msg, "👌").await;
-        return Ok(());
-    }
-
     // No existing session — if this is a DM, auto-create one
     if is_dm(msg) && is_authorized(state, msg).await {
         tracing::info!(user = msg.author.name, "new DM session");
@@ -248,36 +230,15 @@ pub async fn handle_message(
         return start_claude(ctx, msg, state, thread_id, &prompt, None, None, None).await;
     }
 
-    // Thread follow-up with no active/idle/stopped session — check if an expired session exists
+    // Thread follow-up with no active/idle/stopped session — auto-resume expired sessions
     if !is_dm(msg)
         && is_authorized(state, msg).await
         && let Some(old) = crate::db::get_any_session_by_thread(&state.db, thread_id).await?
         && old.owner_id == user_id
         && matches!(old.status, SessionStatus::Expired)
     {
-        let status_label = old.status.as_str();
-        let mention = format!("<@{}>", user_id.get());
-        let warning = format!(
-            "{mention} Previous session is **{status_label}**. \
-             Reply **yes** within {CONFIRM_TIMEOUT_SECS}s to start a new conversation, \
-             or use `/claude` to start fresh in a new thread."
-        );
-        msg.channel_id.say(ctx, &warning).await?;
-
-        // Store original prompt and schedule timeout cleanup (user-scoped)
-        state
-            .session_manager
-            .set_confirm_new(thread_id, user_id, prompt.to_string());
-
-        let state_ref = Arc::clone(state);
-        let tid = thread_id;
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(CONFIRM_TIMEOUT_SECS)).await;
-            state_ref.session_manager.remove_confirm_new(tid);
-            tracing::debug!(?tid, "new-session confirmation timed out");
-        });
-
-        return Ok(());
+        tracing::info!(?thread_id, "auto-resuming expired session");
+        return start_new_in_thread(ctx, msg, state, thread_id, user_id, &prompt).await;
     }
 
     Ok(())
@@ -317,7 +278,16 @@ async fn start_new_in_thread(
     state
         .session_manager
         .set_current_user(thread_id, user_id, Arc::from(msg.author.name.as_str()));
-    start_claude(ctx, msg, state, thread_id, prompt, None, None, None).await
+    if let Err(e) = start_claude(ctx, msg, state, thread_id, prompt, None, None, None).await {
+        // Clean up orphaned DB row to prevent broken state on next message
+        let _ = crate::db::delete_session_by_thread(&state.db, thread_id).await;
+        let _ = msg
+            .channel_id
+            .say(ctx, &format!("Failed to start session: {e}"))
+            .await;
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Check if message is an interrupt request. `!` prefix interrupts current and sends the rest.
@@ -430,7 +400,7 @@ async fn start_claude(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::discord::{is_affirmative, is_negative};
 
     #[test]
     fn affirmative_replies() {
@@ -443,6 +413,20 @@ mod tests {
     fn non_affirmative_replies() {
         for word in ["no", "nope", "fix the bug", "", "yesterday", "yesbutno"] {
             assert!(!is_affirmative(word), "{word:?} should not be affirmative");
+        }
+    }
+
+    #[test]
+    fn negative_replies() {
+        for word in ["no", "n", "Nah", "NOPE", "deny", "cancel", "stop"] {
+            assert!(is_negative(word), "{word:?} should be negative");
+        }
+    }
+
+    #[test]
+    fn non_negative_replies() {
+        for word in ["yes", "maybe", "fix the bug", "", "nothing", "notable"] {
+            assert!(!is_negative(word), "{word:?} should not be negative");
         }
     }
 }

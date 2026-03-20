@@ -331,7 +331,7 @@ pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
     }
 
     let now = chrono::Utc::now();
-    let mut out = format!("**Active sessions: {}/{}**\n", live.len(), max);
+    let mut out = format!("**Sessions: {}/{}**\n", live.len(), max);
     for s in &live {
         let age = super::formatter::format_duration(now - s.created_at);
         let status = if state.session_manager.has_session(s.thread_id) {
@@ -585,7 +585,7 @@ pub async fn audit(
         return Ok(());
     }
 
-    let n = count.unwrap_or(10).clamp(1, 50);
+    let n = count.unwrap_or(3).clamp(1, 50);
 
     // Auto-detect: if invoked inside a session thread, scope to that thread.
     // Otherwise show global results across all threads.
@@ -612,21 +612,18 @@ pub async fn audit(
             let result_str = if row.result_preview.is_empty() {
                 String::new()
             } else {
-                // Truncate result preview for listing view
-                let preview = if row.result_preview.len() > 80 {
-                    format!(
-                        "{}…",
-                        &row.result_preview[..row.result_preview.floor_char_boundary(80)]
-                    )
+                let sanitized = sanitize_preview(&row.result_preview);
+                let preview = if sanitized.len() > 80 {
+                    format!("{}…", &sanitized[..sanitized.floor_char_boundary(80)])
                 } else {
-                    row.result_preview.clone()
+                    sanitized
                 };
                 format!(" → `{preview}`")
             };
             let error_marker = if row.is_error { " ❌" } else { "" };
             let duration_str = row
                 .duration_ms
-                .map(|ms| format!(" {ms}ms"))
+                .map(|ms| format!(" {}", format_duration(ms)))
                 .unwrap_or_default();
             out.push_str(&format!(
                 "`#{}` **{}**{input_str}{result_str}{error_marker}{duration_str} ({})\n",
@@ -659,7 +656,7 @@ fn format_audit_detail(buf: &mut String, d: &crate::db::ToolUseDetail) {
     let error_marker = if d.is_error { " ❌" } else { "" };
     let duration_str = d
         .duration_ms
-        .map(|ms| format!(" ({ms}ms)"))
+        .map(|ms| format!(" ({})", format_duration(ms)))
         .unwrap_or_default();
 
     let _ = writeln!(
@@ -870,12 +867,14 @@ pub async fn sessionban(
     Ok(())
 }
 
-/// Send potentially long text as ephemeral chunked messages.
+/// Send potentially long text as chunked messages.
+/// First chunk completes the deferred interaction; subsequent chunks are followups.
 async fn send_ephemeral_chunked(ctx: &Context<'_>, text: &str) -> Result<(), AppError> {
     if text.len() <= 2000 {
         ctx.say(text).await?;
     } else {
         let mut rest = text;
+        let mut first = true;
         while !rest.is_empty() {
             let end = if rest.len() <= 1990 {
                 rest.len()
@@ -884,10 +883,51 @@ async fn send_ephemeral_chunked(ctx: &Context<'_>, text: &str) -> Result<(), App
             };
             let (chunk, tail) = rest.split_at(end);
             rest = tail;
-            ctx.channel_id().say(ctx.http(), chunk).await?;
+            if first {
+                // Complete the deferred interaction with the first chunk
+                ctx.say(chunk).await?;
+                first = false;
+            } else {
+                ctx.channel_id().say(ctx.http(), chunk).await?;
+            }
         }
     }
     Ok(())
+}
+
+/// Format milliseconds as human-readable duration.
+#[inline]
+fn format_duration(ms: i64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) / 1000;
+        format!("{mins}m{secs}s")
+    }
+}
+
+/// Sanitize a result preview for inline display: collapse whitespace, strip HTML tags.
+#[inline]
+fn sanitize_preview(s: &str) -> String {
+    // Strip HTML tags (simple heuristic: remove <...> sequences)
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    // Collapse whitespace (newlines, tabs, multiple spaces) into single space
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Truncate prompt at word boundary for display in the startup message.

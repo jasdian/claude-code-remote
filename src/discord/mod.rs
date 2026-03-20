@@ -18,6 +18,15 @@ pub(crate) fn is_affirmative(text: &str) -> bool {
     )
 }
 
+/// Check if the user's reply is a negative ("no", "n", "nope", etc.)
+#[inline]
+pub(crate) fn is_negative(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "no" | "n" | "nah" | "nope" | "deny" | "cancel" | "stop"
+    )
+}
+
 pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
     let token = state.config.discord.token.clone();
     let shutdown = state.shutdown.clone();
