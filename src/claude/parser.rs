@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::domain::{ClaudeEvent, ClaudeSessionId, ControlRequestData, ToolInputEntry};
+use crate::domain::{ClaudeEvent, ClaudeExitReason, ClaudeSessionId, ControlRequestData, ToolInputEntry};
 
 /// Parsed output from a single stdout line.
 pub struct ParsedLine {
@@ -66,10 +66,32 @@ pub fn parse_stream_line(line: &str) -> ParsedLine {
         // With --include-partial-messages, assistant events duplicate text already
         // received via stream_event deltas. We skip text, but extract tool_use
         // input_json (which is complete here but empty on content_block_start).
-        "assistant" => ParsedLine {
-            events: parse_assistant_tool_inputs(&v).into_iter().collect(),
-            result_text: None,
-        },
+        // Also detect auth/API errors embedded in the assistant event's "error" field.
+        "assistant" => {
+            if let Some(err) = v.get("error").and_then(|e| e.as_str())
+                && matches!(err, "authentication_failed" | "unauthorized")
+            {
+                let detail = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|b| b.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or(err);
+                return ParsedLine {
+                    events: SmallVec::from_elem(
+                        ClaudeEvent::ExitError(ClaudeExitReason::AuthFailure(detail.into())),
+                        1,
+                    ),
+                    result_text: None,
+                };
+            }
+            ParsedLine {
+                events: parse_assistant_tool_inputs(&v).into_iter().collect(),
+                result_text: None,
+            }
+        }
         "result" => ParsedLine {
             events: SmallVec::from_elem(ClaudeEvent::Done, 1),
             result_text: parse_result(&v),
@@ -256,8 +278,12 @@ fn parse_assistant(v: &serde_json::Value) -> SmallVec<[ClaudeEvent; 2]> {
 
 /// Parse the "result" event. Returns the result text (if any) for the caller
 /// to decide whether to emit it (avoids duplicating content from assistant events).
+/// Suppresses error results — those are already handled by the assistant event's "error" field.
 #[inline]
 fn parse_result(v: &serde_json::Value) -> Option<Arc<str>> {
+    if v.get("is_error").and_then(|e| e.as_bool()).unwrap_or(false) {
+        return None;
+    }
     v.get("result")
         .and_then(|r| r.as_str())
         .filter(|s| !s.is_empty())
@@ -620,6 +646,29 @@ mod tests {
         let line = r#"{"type":"stream_event","event":{"type":"message_stop"}}"#;
         let parsed = parse_stream_line(line);
         assert!(parsed.events.is_empty());
+    }
+
+    #[test]
+    fn parse_assistant_auth_error() {
+        let line = r#"{"type":"assistant","message":{"id":"abc","content":[{"type":"text","text":"Failed to authenticate. API Error: 401"}]},"error":"authentication_failed","session_id":"s1"}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            ClaudeEvent::ExitError(ClaudeExitReason::AuthFailure(detail)) => {
+                assert!(detail.contains("401"), "detail should contain 401: {detail}");
+            }
+            other => panic!("expected AuthFailure, got: {other:?}"),
+        }
+        assert!(parsed.result_text.is_none());
+    }
+
+    #[test]
+    fn parse_result_error_suppressed() {
+        let line = r#"{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate."}"#;
+        let parsed = parse_stream_line(line);
+        assert_eq!(parsed.events.len(), 1);
+        assert!(matches!(&parsed.events[0], ClaudeEvent::Done));
+        assert!(parsed.result_text.is_none(), "error result text should be suppressed");
     }
 
     #[test]

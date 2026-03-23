@@ -442,6 +442,122 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Authenticate with Claude via OAuth (admin only).
+#[poise::command(slash_command)]
+pub async fn login(ctx: Context<'_>) -> Result<(), AppError> {
+    ctx.defer().await?;
+    check_admin(&ctx)?;
+
+    // P2: early return if token is still valid
+    if crate::claude::oauth::is_token_valid().await {
+        ctx.say("Already authenticated (token not expired). Use `/claude` to start a session.")
+            .await?;
+        return Ok(());
+    }
+
+    // Generate PKCE verifier + challenge
+    let pkce = crate::claude::oauth::generate_pkce().await?;
+    let auth_url = crate::claude::oauth::build_authorize_url(&pkce.challenge, &pkce.state);
+
+    ctx.say(format!(
+        "**Authentication required.**\n\n\
+         1. Open this URL and authorize:\n{auth_url}\n\n\
+         2. After authorizing, you'll see a page with an **authorization code**.\n\
+         3. **Paste that code here** within 5 minutes."
+    ))
+    .await?;
+
+    let state = ctx.data();
+    let channel_id = ctx.channel_id();
+    let http = Arc::clone(&ctx.serenity_context().http);
+    let login_thread_id = crate::domain::ThreadId::from(channel_id);
+
+    // Set a reply_waiter to capture the authorization code from the user's next message.
+    // handler.rs intercepts the message and sends it through this oneshot channel.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    state.session_manager.set_reply_waiter(login_thread_id, reply_tx);
+
+    let state_ref = state.clone();
+    tokio::spawn(async move {
+        // Wait for the user to paste the auth code (with 5 minute timeout)
+        let code_result = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            reply_rx,
+        )
+        .await;
+
+        let code = match code_result {
+            Ok(Ok(code)) => code.trim().to_string(),
+            Ok(Err(_)) => {
+                let _ = channel_id.say(&http, "Login cancelled.").await;
+                return;
+            }
+            Err(_) => {
+                state_ref.session_manager.take_reply_waiter(login_thread_id);
+                let _ = channel_id
+                    .say(
+                        &http,
+                        "**Login timed out.** No authorization code received within 5 minutes.\n\n\
+                         **Alternative:** run `claude auth login` on a machine with a browser, \
+                         then copy `~/.claude/.credentials.json` to the server.",
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        // The callback page shows "code#state" — split on '#' to extract just the code.
+        // Also handle if user pastes the full callback URL.
+        let code = if code.starts_with("http") {
+            // User pasted the full callback URL — extract code param
+            code.split("code=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .unwrap_or(&code)
+                .to_string()
+        } else if let Some((c, _)) = code.split_once('#') {
+            c.to_string()
+        } else {
+            code
+        };
+
+        if code.is_empty() {
+            let _ = channel_id.say(&http, "Empty code received. Login cancelled.").await;
+            return;
+        }
+
+        let _ = channel_id.say(&http, "Exchanging authorization code for tokens...").await;
+
+        // Exchange the code + verifier at the token endpoint
+        match crate::claude::oauth::exchange_code(&code, &pkce.verifier, &pkce.state).await {
+            Ok(token_response) => {
+                match crate::claude::oauth::write_credentials(&token_response).await {
+                    Ok(()) => {
+                        tracing::info!("OAuth login successful, credentials written");
+                        let _ = channel_id
+                            .say(&http, "Authentication successful. Use `/claude` to start a session.")
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to write credentials");
+                        let _ = channel_id
+                            .say(&http, &format!("**Error writing credentials:** {e}"))
+                            .await;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "token exchange failed");
+                let _ = channel_id
+                    .say(&http, &format!("**Token exchange failed:** {e}"))
+                    .await;
+            }
+        }
+    });
+
+    Ok(())
+}
+
 /// Send a Claude CLI internal command (e.g. /compact, /context) to the session.
 async fn send_session_command(
     ctx: &Context<'_>,

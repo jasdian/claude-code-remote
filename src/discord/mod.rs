@@ -51,6 +51,7 @@ pub async fn start_bot(state: Arc<AppState>) -> Result<(), AppError> {
                 commands::sessionkick(),
                 commands::handoff(),
                 commands::sessionban(),
+                commands::login(),
             ],
             event_handler: |ctx, event, _fw_ctx, state| {
                 Box::pin(async move {

@@ -204,11 +204,14 @@ dependencies = [
 name = "claude-crew"
 version = "0.8.0"
 dependencies = [
+ "base64",
  "chrono",
  "dashmap 6.1.0",
  "poise",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
  "sqlx",
  "thiserror 2.0.18",

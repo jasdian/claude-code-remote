@@ -89,6 +89,12 @@ pub async fn handle_message(
     let thread_id = ThreadId::from(msg.channel_id);
     let user_id = UserId::from(msg.author.id);
 
+    // Intercept messages when a channel-level waiter is active (e.g. /login swallows pastes)
+    if let Some(reply_tx) = state.session_manager.take_reply_waiter(thread_id) {
+        let _ = reply_tx.send(prompt.to_string());
+        return Ok(());
+    }
+
     // Check for existing session (thread follow-up or DM continuation)
     if let Some(session) = crate::db::get_session_by_thread(&state.db, thread_id).await? {
         // Multi-user: allow owner and participants; auto-join authorized users

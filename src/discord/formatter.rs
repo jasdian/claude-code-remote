@@ -7,7 +7,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
-use crate::domain::{ClaudeEvent, SessionStatus, ThreadId};
+use crate::domain::{ClaudeEvent, ClaudeExitReason, SessionStatus, ThreadId};
 
 const BUFFER_INITIAL_CAPACITY: usize = 2048;
 const FLUSH_THRESHOLD: usize = 1800;
@@ -395,10 +395,26 @@ async fn stream_events(
                         ).await;
                     }
                     Some(ClaudeEvent::ExitError(reason)) => {
-                        if let Some(msg) = reason.user_message() {
-                            sent_any = true;
-                            send_message(http, channel_id, &msg).await;
-                        }
+                        let msg = match &reason {
+                            ClaudeExitReason::AuthFailure(detail) => {
+                                let is_admin = state
+                                    .session_manager
+                                    .get_current_user(thread_id)
+                                    .map(|uid| state.config.auth.admins.contains(&uid.get()))
+                                    .unwrap_or(false);
+                                if is_admin {
+                                    format!("**Auth expired.** Run `/login` to refresh credentials.\n```\n{detail}\n```")
+                                } else {
+                                    format!("**Auth expired.** An admin needs to run `/login` to refresh credentials.\n```\n{detail}\n```")
+                                }
+                            }
+                            other => match other.user_message() {
+                                Some(msg) => msg,
+                                None => continue,
+                            },
+                        };
+                        sent_any = true;
+                        send_message(http, channel_id, &msg).await;
                     }
                     Some(ClaudeEvent::Error(e)) => {
                         sent_any = true;

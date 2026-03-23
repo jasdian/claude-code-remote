@@ -63,7 +63,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Smart message chunking (handles Discord's 2000-char limit)
 - Typing indicators and tool-use status
 - **Interactive prompts** -- `AskUserQuestion` and permission requests are shown in Discord with @mention; reply to answer, auto-denied after 120s timeout
-- **Expired session warnings** -- messages in ended/expired threads prompt confirmation before starting a new session (60s timeout)
+- **Expired session auto-resume** -- messages in expired threads automatically start a fresh session with the user's message as the prompt (no confirmation needed)
 - `/end` archives the thread after stopping the session
 
 **Claude Code Management**
@@ -78,6 +78,8 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a PR via `gh` CLI if there are commits ahead of the default branch. **Note:** auto-PR currently uses `gh` (GitHub CLI) only. For GitLab repositories, keep `auto_pr = false` and create merge requests manually or let Claude do it via Bash with `glab mr create`
 - **Co-authored commits** -- map Discord users to GitHub usernames/emails via config; collaborative sessions automatically add `Co-authored-by` trailers to every commit via a `prepare-commit-msg` git hook (worktree sessions) plus system prompt hints (all sessions)
 - **Context-aware sessions** -- periodic background task summarizes each session's activity (files touched, tools used, recent messages) and injects sibling summaries into the system prompt. Sessions on the same project know what each other is doing -- preventing conflicting edits and enabling coordinated parallel work. Includes **file conflict detection** with warnings when sessions touch overlapping files. Opt-in via `[claude.context_sharing] enabled = true`
+- **Auth error detection** -- 401/auth failures from the Claude API are detected in the stream output and displayed as a formatted message with guidance to run `/login`
+- **`/login` command** -- admin-only OAuth PKCE flow, entirely from Discord. Generates an authorization URL, user authorizes in browser and pastes the callback code, bot exchanges it for tokens via the Anthropic API and writes `~/.claude/.credentials.json`. No CLI subprocess, no TTY, no manual file transfer needed
 - Session timeout and automatic cleanup
 - stderr capture -- Claude process errors are logged and surfaced to Discord
 
@@ -103,7 +105,7 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 
 **Both:**
 - **Discord Bot** -- created via the Developer Portal (see setup below)
-- **Anthropic API key** -- for the Claude CLI
+- **Anthropic authentication** -- use `/login` in Discord (OAuth PKCE, recommended), or set `ANTHROPIC_API_KEY` env var
 
 ## Discord Bot Setup
 
@@ -248,6 +250,7 @@ The bot uses `--permission-prompt-tool stdio --permission-mode default` to route
 | `/context` | Session thread | Show current context window and token usage |
 | `/end` | Session thread | Stop session and archive the thread (owner/admin only) |
 | `/sessions` | Anywhere | List active sessions with thread links, project names, age, and status |
+| `/projects` | Anywhere | List git repositories discoverable as sibling directories of default_cwd |
 
 #### Collaboration
 
@@ -268,6 +271,7 @@ The bot uses `--permission-prompt-tool stdio --permission-mode default` to route
 | `/revoke <user>` | Anywhere | Admin: revoke a user's access (ephemeral) |
 | `/pending` | Anywhere | Admin: list pending requests (ephemeral) |
 | `/audit [id] [count] [detail]` | Session thread | Admin: view tool usage audit log; `detail=true` shows full input JSON and result (ephemeral) |
+| `/login` | Anywhere | Admin: OAuth PKCE login — open URL, authorize, paste code, done |
 
 After the initial `/claude` command in a server, just type messages in the thread -- the bot picks them up automatically.
 
@@ -379,14 +383,15 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 | Problem | Fix |
 |---------|-----|
 | "Missing Access" on `/claude` | The bot needs **Create Public Threads** permission. Check both the bot role AND channel-level permission overrides -- if the channel denies thread creation for `@everyone`, the bot needs an explicit allow override on that channel |
-| "The application did not respond" on `/claude` | Ensure the bot has Send Messages permission |
+| "The application did not respond" on `/claude` | Ensure the bot has Send Messages permission. If the bot just restarted, wait a few seconds for Discord to register commands |
 | Bot connects then disconnects with "Disallowed intents" | Enable **Message Content Intent** in Bot settings on the Developer Portal |
 | Slash commands don't appear | Wait 1-2 minutes after first bot startup for Discord to register them globally |
 | Bot doesn't respond to DMs | Make sure your user ID is in `auth.allowed_users` in config.toml |
 | "failed to spawn claude" error | Ensure `claude` CLI is in PATH and authenticated. On NixOS, use an FHS wrapper script as `binary` |
 | Bot responds but Claude output is empty | Check stderr logs -- Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
-| Follow-up messages start new conversations | The bot now warns you when a session is expired/stopped and asks to confirm before starting a new one. Check logs for `claude_session_id` if issues persist |
+| Follow-up messages start new conversations | Expired sessions auto-resume with a fresh session. Stopped sessions (via `/end`) also resume on the next message. Check logs for `claude_session_id` if issues persist |
+| "Auth expired" / 401 errors | Run `/login` (admin only) to refresh OAuth credentials. The bot detects 401 errors and shows guidance |
 | Sessions stuck after bot restart | Fixed: on startup the bot reconciles all "active" sessions to "idle", so the next message in the thread resumes normally |
 | Ctrl+C doesn't work | Fixed in v0.2.0: Claude subprocesses now run in their own process group, so SIGINT only reaches the bot which handles graceful shutdown |
 | "Invalid Form Body (name)" error | Thread name exceeded 100 chars -- this is now fixed with proper truncation |

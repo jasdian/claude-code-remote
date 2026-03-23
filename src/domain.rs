@@ -269,6 +269,8 @@ impl ClaudeExitReason {
 
         if stderr_lower.contains("unauthorized")
             || stderr_lower.contains("invalid api key")
+            || stderr_lower.contains("oauth token has expired")
+            || (stderr_lower.contains("401") && stderr_lower.contains("authentication"))
             || (stderr_lower.contains("auth")
                 && (stderr_lower.contains("fail") || stderr_lower.contains("error")))
         {
@@ -290,7 +292,7 @@ impl ClaudeExitReason {
                 "**Error:** Claude CLI not found in PATH. Check the `binary` setting in your config.".into()
             ),
             Self::AuthFailure(detail) => Some(format!(
-                "**Error:** Claude authentication failed. Run `claude` manually to re-authenticate.\n```\n{detail}\n```"
+                "**Auth expired.** Run `/login` to refresh credentials.\n```\n{detail}\n```"
             )),
             Self::RateLimited(detail) => Some(format!(
                 "**Rate limited:** Claude is overloaded. Try again in a minute.\n```\n{detail}\n```"
