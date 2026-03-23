@@ -278,6 +278,55 @@ pub async fn try_create_pr(worktree_path: &Path, project: &str) -> Option<String
     Some(url)
 }
 
+/// Best-effort push of the worktree branch to the remote.
+/// Returns `Ok(true)` if pushed, `Ok(false)` if nothing to push, `Err` on failure.
+pub async fn try_push_branch(worktree_path: &Path) -> Result<bool, Box<str>> {
+    let repo_root = worktree_path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| Box::<str>::from("cannot derive repo root"))?;
+    let tid_str = worktree_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Box::<str>::from("invalid worktree path"))?;
+    let branch = format!("{BRANCH_PREFIX}{tid_str}");
+
+    let default_branch = detect_default_branch(repo_root)
+        .await
+        .ok_or_else(|| Box::<str>::from("cannot detect default branch"))?;
+
+    // Count commits ahead of default branch
+    let output = Command::new("git")
+        .args(["rev-list", "--count", &format!("{default_branch}..HEAD")])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| Box::<str>::from(format!("rev-list failed: {e}")))?;
+
+    let count: u32 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    if count == 0 {
+        return Ok(false);
+    }
+
+    let push = Command::new("git")
+        .args(["push", "-u", "origin", &branch])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map_err(|e| Box::<str>::from(format!("push spawn failed: {e}")))?;
+
+    if !push.status.success() {
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        return Err(Box::from(format!("git push failed: {stderr}").as_str()));
+    }
+
+    tracing::info!(%branch, count, "pushed worktree branch to remote");
+    Ok(true)
+}
+
 /// Resolve the effective cwd for a Claude session.
 ///
 /// If an existing worktree path is provided and still exists on disk, reuses it.

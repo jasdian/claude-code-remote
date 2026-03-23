@@ -178,17 +178,28 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
     let had_session = session.is_some();
 
     if had_session {
-        // Try auto-PR before cleaning up the worktree
         let project = session.as_ref().map(|s| s.project.as_ref()).unwrap_or("");
         let auto_pr = ctx.data().config.claude.resolve_auto_pr(Some(project));
         let mut pr_url: Option<String> = None;
+        let mut pushed = false;
 
-        if auto_pr && let Some(ref wt) = wt_path {
-            pr_url = crate::claude::worktree::try_create_pr(wt, project).await;
+        if let Some(ref wt) = wt_path {
+            // Try auto-PR first if enabled
+            if auto_pr {
+                pr_url = crate::claude::worktree::try_create_pr(wt, project).await;
+            }
+
+            // If no PR was created, try pushing the branch standalone
+            if pr_url.is_none() {
+                match crate::claude::worktree::try_push_branch(wt).await {
+                    Ok(did_push) => pushed = did_push,
+                    Err(e) => tracing::warn!(error = %e, "worktree branch push failed"),
+                }
+            }
         }
 
-        // Remove worktree; keep branch alive if PR was created
-        let keep_branch = pr_url.is_some();
+        // Keep branch if work was pushed (PR or standalone push)
+        let keep_branch = pr_url.is_some() || pushed;
         if let Some(ref wt) = wt_path {
             crate::claude::worktree::remove_worktree(wt, keep_branch).await;
         }
@@ -197,9 +208,10 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
         let _ =
             crate::db::mark_summary_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await;
 
-        let msg = match pr_url {
-            Some(url) => format!("Session ended. PR created: {url}"),
-            None => "Session ended.".to_string(),
+        let msg = match (&pr_url, pushed) {
+            (Some(url), _) => format!("Session ended. PR created: {url}"),
+            (None, true) => "Session ended. Branch pushed to remote.".into(),
+            (None, false) => "Session ended.".into(),
         };
         ctx.say(&msg).await?;
         // Archive the thread (not in DMs). Users can still send messages
