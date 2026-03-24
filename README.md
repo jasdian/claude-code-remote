@@ -210,6 +210,7 @@ cwd = "/home/you/projects/myapp"
 
 [auth]
 admins = [123456789012345678]                        # Can /approve, /revoke, /pending
+admin_roles = []                                     # Roles with admin privileges
 allowed_users = [123456789012345678]                  # Always authorized (config-managed)
 allowed_roles = []                                   # Always authorized (by role)
 
@@ -281,7 +282,7 @@ If Claude is busy, your message is **queued** and sent automatically when the cu
 
 Users can be authorized in three ways:
 1. **Config** -- `allowed_users` and `admins` in `config.toml` (permanent, requires restart)
-2. **Roles** -- `allowed_roles` in config (Discord role-based)
+2. **Roles** -- `allowed_roles` and `admin_roles` in config (Discord role-based)
 3. **Dynamic** -- `/optin` request approved by an admin via `/approve` (stored in DB, instant)
 
 ## Build Commands

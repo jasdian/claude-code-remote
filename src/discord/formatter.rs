@@ -450,7 +450,7 @@ async fn stream_events(
 }
 
 #[inline]
-fn update_fence_state(text: &str, in_fence: &mut bool) {
+pub(crate) fn update_fence_state(text: &str, in_fence: &mut bool) {
     let count = text.matches("```").count();
     if count % 2 == 1 {
         *in_fence = !*in_fence;
@@ -489,7 +489,7 @@ fn take_all(buffer: &mut String) -> String {
 }
 
 #[inline]
-fn find_split_point(text: &str, max: usize) -> usize {
+pub(crate) fn find_split_point(text: &str, max: usize) -> usize {
     let search_range = &text[..max.min(text.len())];
 
     search_range

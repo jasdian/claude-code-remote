@@ -363,13 +363,27 @@ pub async fn sessions(ctx: Context<'_>) -> Result<(), AppError> {
 }
 
 #[inline]
-fn check_admin(ctx: &Context<'_>) -> Result<(), AppError> {
+async fn check_admin(ctx: &Context<'_>) -> Result<(), AppError> {
     let user_id = ctx.author().id.get();
-    if ctx.data().config.auth.admins.contains(&user_id) {
-        Ok(())
-    } else {
-        Err(AppError::unauthorized("not an admin"))
+    let auth = &ctx.data().config.auth;
+
+    if auth.admins.contains(&user_id) {
+        return Ok(());
     }
+
+    if !auth.admin_roles.is_empty()
+        && let Some(member) = ctx.author_member().await
+    {
+        let has_role = member
+            .roles
+            .iter()
+            .any(|role| auth.admin_roles.iter().any(|&ar| ar == role.get()));
+        if has_role {
+            return Ok(());
+        }
+    }
+
+    Err(AppError::unauthorized("not an admin"))
 }
 
 // --- Access request commands ---
@@ -409,7 +423,7 @@ pub async fn approve(
     #[description = "User to approve"] user: serenity::User,
 ) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
     if crate::db::approve_access(&ctx.data().db, user.id.get()).await? {
         ctx.say(format!("Approved **{}**.", user.name)).await?;
     } else {
@@ -425,7 +439,7 @@ pub async fn revoke(
     #[description = "User to revoke access from"] user: serenity::User,
 ) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
     if crate::db::revoke_access(&ctx.data().db, user.id.get()).await? {
         ctx.say(format!("Revoked access for **{}**.", user.name))
             .await?;
@@ -439,7 +453,7 @@ pub async fn revoke(
 #[poise::command(slash_command)]
 pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
     let requests = crate::db::get_pending_requests(&ctx.data().db).await?;
     if requests.is_empty() {
         ctx.say("No pending requests.").await?;
@@ -458,7 +472,7 @@ pub async fn pending(ctx: Context<'_>) -> Result<(), AppError> {
 #[poise::command(slash_command)]
 pub async fn login(ctx: Context<'_>) -> Result<(), AppError> {
     ctx.defer().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
 
     // P2: early return if token is still valid
     if crate::claude::oauth::is_token_valid().await {
@@ -681,7 +695,7 @@ pub async fn audit(
     #[description = "Show full detail for a specific ID"] detail: Option<bool>,
 ) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
     let thread_id = crate::domain::ThreadId::from(ctx.channel_id());
 
     // Detail mode: show full input_json for specific ID(s)
@@ -958,7 +972,7 @@ pub async fn sessionban(
     #[description = "User to ban from session and revoke access"] user: serenity::User,
 ) -> Result<(), AppError> {
     ctx.defer_ephemeral().await?;
-    check_admin(&ctx)?;
+    check_admin(&ctx).await?;
     let thread_id = ThreadId::from(ctx.channel_id());
 
     let session = crate::db::get_session_by_thread(&ctx.data().db, thread_id).await?;
@@ -998,27 +1012,45 @@ pub async fn sessionban(
 /// Send potentially long text as chunked messages.
 /// First chunk completes the deferred interaction; subsequent chunks are followups.
 async fn send_ephemeral_chunked(ctx: &Context<'_>, text: &str) -> Result<(), AppError> {
+    use super::formatter::{find_split_point, update_fence_state};
+    const CHUNK_MAX: usize = 1900; // leave room for fence close/open markers
+
     if text.len() <= 2000 {
         ctx.say(text).await?;
-    } else {
-        let mut rest = text;
-        let mut first = true;
-        while !rest.is_empty() {
-            let end = if rest.len() <= 1990 {
-                rest.len()
-            } else {
-                rest.floor_char_boundary(1990)
-            };
-            let (chunk, tail) = rest.split_at(end);
-            rest = tail;
-            if first {
-                // Complete the deferred interaction with the first chunk
-                ctx.say(chunk).await?;
-                first = false;
-            } else {
-                ctx.channel_id().say(ctx.http(), chunk).await?;
-            }
+        return Ok(());
+    }
+
+    let mut remaining = text.to_string();
+    let mut in_fence = false;
+
+    while !remaining.is_empty() {
+        if remaining.len() <= 2000 {
+            ctx.say(&remaining).await?;
+            break;
         }
+        let split = find_split_point(&remaining, CHUNK_MAX);
+        let mut chunk = remaining[..split].to_string();
+
+        // Track fence state of this chunk
+        update_fence_state(&chunk, &mut in_fence);
+
+        if in_fence {
+            chunk.push_str("\n```");
+        }
+
+        ctx.say(&chunk).await?;
+
+        // Prepare remainder
+        let rest_start = if remaining[split..].starts_with('\n') {
+            split + 1
+        } else {
+            split
+        };
+        remaining = if in_fence {
+            format!("```\n{}", &remaining[rest_start..])
+        } else {
+            remaining[rest_start..].to_string()
+        };
     }
     Ok(())
 }
