@@ -173,18 +173,69 @@ pub async fn handle_message(
             return Ok(());
         }
 
-        // Resume existing session (or start fresh if previously stopped)
+        // Resume existing session (worktree-aware for stopped sessions)
         let is_stopped = session.status == SessionStatus::Stopped;
-        // If stopped, worktree/session were cleaned up by /end — start fresh
-        let resume_id = if is_stopped {
-            None
+        let (resume_id, worktree) = if is_stopped {
+            let wt = session.worktree_path.as_deref();
+            let wt_exists = match wt {
+                Some(path) => tokio::fs::metadata(path).await.is_ok(),
+                None => false,
+            };
+
+            if session.is_pushed {
+                // Branch was pushed — check if it still exists on remote
+                // Use worktree path (even if gone from disk) to derive branch name
+                if let Some(path) = wt {
+                    let wt_path = std::path::Path::new(path);
+                    if !crate::claude::worktree::remote_branch_exists(wt_path).await {
+                        // Branch merged/deleted on remote — session stays ended
+                        let _ = msg
+                            .channel_id
+                            .say(
+                                ctx,
+                                "This session's branch was pushed but no longer exists on the \
+                                 remote (likely merged or deleted). Session stays ended. \
+                                 Use `/claude` to start a new session.",
+                            )
+                            .await;
+                        return Ok(());
+                    }
+                    if wt_exists {
+                        // Pull latest, start fresh conversation (stale context risk)
+                        if let Err(e) =
+                            crate::claude::worktree::try_pull_branch(wt_path).await
+                        {
+                            let _ = msg
+                                .channel_id
+                                .say(
+                                    ctx,
+                                    &format!("Warning: git pull failed in worktree: {e}"),
+                                )
+                                .await;
+                        }
+                        (None, wt)
+                    } else {
+                        // Worktree removed but branch on remote — fresh start
+                        (None, None)
+                    }
+                } else {
+                    // No worktree path at all — fresh start
+                    (None, None)
+                }
+            } else if wt_exists {
+                // Not pushed but worktree preserved on disk — resume conversation
+                // (code state is identical to when session ended)
+                (session.claude_session_id.as_ref().map(|s| s.as_str()), wt)
+            } else {
+                // No worktree on disk — fresh start
+                (None, None)
+            }
         } else {
-            session.claude_session_id.as_ref().map(|s| s.as_str())
-        };
-        let worktree = if is_stopped {
-            None
-        } else {
-            session.worktree_path.as_deref()
+            // Idle session — preserve existing behavior
+            (
+                session.claude_session_id.as_ref().map(|s| s.as_str()),
+                session.worktree_path.as_deref(),
+            )
         };
         tracing::info!(
             ?thread_id,

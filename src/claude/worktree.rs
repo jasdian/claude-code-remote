@@ -327,6 +327,77 @@ pub async fn try_push_branch(worktree_path: &Path) -> Result<bool, Box<str>> {
     Ok(true)
 }
 
+/// Check if a worktree has uncommitted changes or commits ahead of the default branch.
+/// Returns `(has_uncommitted, commits_ahead)`.
+pub async fn worktree_local_state(worktree_path: &Path) -> (bool, u32) {
+    let has_uncommitted = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false);
+
+    // If we can't derive repo root or default branch, assume there are local
+    // commits to avoid accidentally deleting a worktree with unpushed work.
+    let repo_root = worktree_path.parent().and_then(Path::parent);
+    let commits_ahead = if let Some(root) = repo_root
+        && let Some(db) = detect_default_branch(root).await
+    {
+        Command::new("git")
+            .args(["rev-list", "--count", &format!("{db}..HEAD")])
+            .current_dir(worktree_path)
+            .output()
+            .await
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(1) // unknown → assume has commits (safe default)
+    } else {
+        1 // cannot determine → assume has commits (preserve worktree)
+    };
+
+    (has_uncommitted, commits_ahead)
+}
+
+/// Pull latest changes in a worktree (fast-forward only).
+/// Returns `Ok(())` on success, `Err` with message on failure.
+pub async fn try_pull_branch(worktree_path: &Path) -> Result<(), Box<str>> {
+    let output = Command::new("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(worktree_path)
+        .output()
+        .await
+        .map_err(|e| Box::<str>::from(format!("git pull failed to spawn: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Box::<str>::from(format!("git pull failed: {stderr}")));
+    }
+    Ok(())
+}
+
+/// Check if the worktree's branch still exists on the remote.
+/// Returns `true` if the remote branch exists, `false` if missing or on error.
+pub async fn remote_branch_exists(worktree_path: &Path) -> bool {
+    let tid_str = match worktree_path.file_name().and_then(|n| n.to_str()) {
+        Some(s) => s,
+        None => return false,
+    };
+    let repo_root = match worktree_path.parent().and_then(Path::parent) {
+        Some(r) => r,
+        None => return false,
+    };
+    let branch = format!("{BRANCH_PREFIX}{tid_str}");
+
+    Command::new("git")
+        .args(["ls-remote", "--exit-code", "--heads", "origin", &branch])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Resolve the effective cwd for a Claude session.
 ///
 /// If an existing worktree path is provided and still exists on disk, reuses it.
@@ -616,10 +687,11 @@ async fn has_branch_commits(repo_root: &Path, branch: &str) -> bool {
 }
 
 /// Clean up orphaned worktrees from stopped/expired sessions on startup.
+/// Preserves worktrees with unpushed local changes (uncommitted or commits ahead).
 /// Also cleans up CLI agent worktrees that were left behind by killed processes.
 pub async fn cleanup_orphaned(pool: &SqlitePool, config: &ClaudeConfig) {
-    let rows: Vec<(i64, String)> = match sqlx::query_as(
-        "SELECT thread_id, worktree_path FROM sessions
+    let rows: Vec<(i64, String, i32)> = match sqlx::query_as(
+        "SELECT thread_id, worktree_path, is_pushed FROM sessions
          WHERE worktree_path IS NOT NULL AND status IN ('stopped', 'expired')",
     )
     .fetch_all(pool)
@@ -633,14 +705,47 @@ pub async fn cleanup_orphaned(pool: &SqlitePool, config: &ClaudeConfig) {
     };
 
     if !rows.is_empty() {
-        tracing::info!(count = rows.len(), "cleaning up orphaned worktrees");
+        tracing::info!(count = rows.len(), "checking orphaned worktrees");
 
-        for (tid, path) in &rows {
-            remove_worktree(Path::new(path), false).await;
-            let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
-                .bind(tid)
-                .execute(pool)
-                .await;
+        for (tid, path, is_pushed_i) in &rows {
+            let wt = Path::new(path);
+            let is_pushed = *is_pushed_i != 0;
+
+            // If worktree doesn't exist on disk, just clear the DB reference
+            if tokio::fs::metadata(wt).await.is_err() {
+                let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
+                    .bind(tid)
+                    .execute(pool)
+                    .await;
+                continue;
+            }
+
+            if is_pushed {
+                // Pushed — safe to remove worktree (branch preserved on remote)
+                remove_worktree(wt, true).await;
+                let _ = sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
+                    .bind(tid)
+                    .execute(pool)
+                    .await;
+            } else {
+                let (has_uncommitted, commits_ahead) = worktree_local_state(wt).await;
+                if has_uncommitted || commits_ahead > 0 {
+                    tracing::warn!(
+                        thread_id = tid,
+                        ?wt,
+                        has_uncommitted,
+                        commits_ahead,
+                        "preserving orphaned worktree: has unpushed local changes"
+                    );
+                } else {
+                    remove_worktree(wt, false).await;
+                    let _ =
+                        sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
+                            .bind(tid)
+                            .execute(pool)
+                            .await;
+                }
+            }
         }
     }
 

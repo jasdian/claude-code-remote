@@ -75,6 +75,8 @@ Works in both **DMs** (just message the bot directly) and **server channels** (c
 - Configurable tool permissions per project (auto-approved in headless mode)
 - Optional `--dangerously-skip-permissions` for trusted environments
 - **Git worktree isolation** -- optional per-project worktree per session, so concurrent sessions on the same repo don't conflict (`use_worktrees = true`)
+- **Smart worktree lifecycle on `/end`** -- tracks whether the worktree branch was pushed (`is_pushed` in DB). If not pushed and has local changes (uncommitted or commits ahead), the worktree is **preserved** with an explicit message. If pushed, the worktree is cleaned up. The session reaper and startup cleanup apply the same logic -- worktrees with unpushed local work are never silently deleted
+- **Worktree-aware resume after `/end`** -- sending a message in an ended session thread resumes intelligently: if the branch was pushed and still exists on the remote, `git pull --ff-only` runs first (fresh conversation to avoid stale context); if the worktree was preserved locally (not pushed), the conversation resumes with `--resume` (code state is identical). If the branch was pushed but no longer exists on the remote (merged or deleted), the session stays ended with an explicit message
 - **Auto-PR on `/end`** -- when enabled (`auto_pr = true`), `/end` pushes the worktree branch and creates a PR via `gh` CLI if there are commits ahead of the default branch. **Note:** auto-PR currently uses `gh` (GitHub CLI) only. For GitLab repositories, keep `auto_pr = false` and create merge requests manually or let Claude do it via Bash with `glab mr create`
 - **Co-authored commits** -- map Discord users to GitHub usernames/emails via config; collaborative sessions automatically add `Co-authored-by` trailers to every commit via a `prepare-commit-msg` git hook (worktree sessions) plus system prompt hints (all sessions)
 - **Context-aware sessions** -- periodic background task summarizes each session's activity (files touched, tools used, recent messages) and injects sibling summaries into the system prompt. Sessions on the same project know what each other is doing -- preventing conflicting edits and enabling coordinated parallel work. Includes **file conflict detection** with warnings when sessions touch overlapping files. Opt-in via `[claude.context_sharing] enabled = true`
@@ -249,7 +251,7 @@ The bot uses `--permission-prompt-tool stdio --permission-mode default` to route
 | `!message` | Session thread | Interrupt current task and send message |
 | `/compact` | Session thread | Summarize conversation to reduce context usage |
 | `/context` | Session thread | Show current context window and token usage |
-| `/end` | Session thread | Stop session and archive the thread (owner/admin only) |
+| `/end` | Session thread | Stop session and archive the thread; preserves worktree if branch has unpushed local work (owner/admin only) |
 | `/sessions` | Anywhere | List active sessions with thread links, project names, age, and status |
 | `/projects` | Anywhere | List git repositories discoverable as sibling directories of default_cwd |
 
@@ -391,7 +393,7 @@ See [PLAN.md](PLAN.md) for the full implementation guide including module struct
 | "failed to spawn claude" error | Ensure `claude` CLI is in PATH and authenticated. On NixOS, use an FHS wrapper script as `binary` |
 | Bot responds but Claude output is empty | Check stderr logs -- Claude errors are now logged. Verify `default_cwd` is valid |
 | Claude can't use tools (permission denied) | Add the tools to `allowed_tools` in config, or set `dangerously_skip_permissions = true` |
-| Follow-up messages start new conversations | Expired sessions auto-resume with a fresh session. Stopped sessions (via `/end`) also resume on the next message. Check logs for `claude_session_id` if issues persist |
+| Follow-up messages start new conversations | Expired sessions auto-resume with a fresh session. Stopped sessions (via `/end`) resume worktree-aware: preserved worktrees resume with `--resume`, pushed worktrees pull then start fresh, pushed+deleted branches block resume. Check logs for `claude_session_id` if issues persist |
 | "Auth expired" / 401 errors | Run `/login` (admin only) to refresh OAuth credentials. The bot detects 401 errors and shows guidance |
 | Sessions stuck after bot restart | Fixed: on startup the bot reconciles all "active" sessions to "idle", so the next message in the thread resumes normally |
 | Ctrl+C doesn't work | Fixed in v0.2.0: Claude subprocesses now run in their own process group, so SIGINT only reaches the bot which handles graceful shutdown |

@@ -79,6 +79,7 @@ pub struct Session {
     pub project: Arc<str>,
     pub created_at: DateTime<Utc>,
     pub worktree_path: Option<Arc<str>>,
+    pub is_pushed: bool,
 }
 
 // Multi-user support types

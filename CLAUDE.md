@@ -108,7 +108,7 @@ Discord message (or @mention) -> poise handler -> strip bot mention if present
 
 ### Database
 
-Single table: `sessions` (id UUID, thread_id, user_id, claude_session_id, project, status, timestamps).
+Single table: `sessions` (id UUID, thread_id, user_id, claude_session_id, project, status, timestamps, worktree_path, is_pushed).
 
 ### Configuration
 
@@ -123,7 +123,15 @@ Two-phase TOML loading: `RawAppConfig` (serde Strings) -> `AppConfig` (validated
 
 ### Session Lifecycle
 
-Status transitions: `idle` → `active` (SessionId received) → `idle` (process completes) → `expired` (reaped) or `stopped` (user /stop).
+Status transitions: `idle` → `active` (SessionId received) → `idle` (process completes) → `expired` (reaped) or `stopped` (user /end).
+
+**Resume after `/end`**: `is_pushed` (DB bool) tracks whether the worktree branch was pushed to remote. On resume:
+- `is_pushed` + branch on remote → `git pull --ff-only`, fresh conversation (no `--resume`, stale context risk)
+- `is_pushed` + branch gone from remote (merged/deleted) → resume blocked, session stays ended
+- Not pushed + worktree on disk → `--resume` with `claude_session_id` (code state identical)
+- No worktree on disk → fresh start
+
+**Worktree preservation**: `/end`, the reaper, and startup cleanup all check `worktree_local_state()` before removing. Worktrees with uncommitted changes or unpushed commits are never silently deleted.
 
 ### Slash Command Interaction
 

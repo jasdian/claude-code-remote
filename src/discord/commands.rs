@@ -181,7 +181,7 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
         let project = session.as_ref().map(|s| s.project.as_ref()).unwrap_or("");
         let auto_pr = ctx.data().config.claude.resolve_auto_pr(Some(project));
         let mut pr_url: Option<String> = None;
-        let mut pushed = false;
+        let mut is_pushed = false;
 
         if let Some(ref wt) = wt_path {
             // Try auto-PR first if enabled
@@ -189,29 +189,65 @@ pub async fn end(ctx: Context<'_>) -> Result<(), AppError> {
                 pr_url = crate::claude::worktree::try_create_pr(wt, project).await;
             }
 
-            // If no PR was created, try pushing the branch standalone
-            if pr_url.is_none() {
+            if pr_url.is_some() {
+                is_pushed = true;
+            } else {
+                // If no PR was created, try pushing the branch standalone
                 match crate::claude::worktree::try_push_branch(wt).await {
-                    Ok(did_push) => pushed = did_push,
+                    Ok(true) => is_pushed = true,
+                    Ok(false) => {}
                     Err(e) => tracing::warn!(error = %e, "worktree branch push failed"),
                 }
             }
         }
 
-        // Keep branch if work was pushed (PR or standalone push)
-        let keep_branch = pr_url.is_some() || pushed;
+        // Persist push state before any destructive worktree action
+        if wt_path.is_some() {
+            let _ = crate::db::set_is_pushed(&ctx.data().db, thread_id, is_pushed).await;
+        }
+
+        // Determine worktree fate based on push state and local changes
+        let mut worktree_preserved = false;
         if let Some(ref wt) = wt_path {
-            crate::claude::worktree::remove_worktree(wt, keep_branch).await;
+            if is_pushed {
+                // Pushed — safe to remove worktree, keep branch on remote
+                crate::claude::worktree::remove_worktree(wt, true).await;
+            } else {
+                let (has_uncommitted, commits_ahead) =
+                    crate::claude::worktree::worktree_local_state(wt).await;
+                if !has_uncommitted && commits_ahead == 0 {
+                    // Clean worktree — safe to remove entirely
+                    crate::claude::worktree::remove_worktree(wt, false).await;
+                } else {
+                    // Preserve worktree — local work exists
+                    worktree_preserved = true;
+                    tracing::warn!(
+                        ?wt,
+                        has_uncommitted,
+                        commits_ahead,
+                        "preserving worktree: branch not pushed and has local changes"
+                    );
+                }
+            }
         }
 
         crate::db::update_session_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await?;
         let _ =
             crate::db::mark_summary_status(&ctx.data().db, thread_id, SessionStatus::Stopped).await;
 
-        let msg = match (&pr_url, pushed) {
-            (Some(url), _) => format!("Session ended. PR created: {url}"),
-            (None, true) => "Session ended. Branch pushed to remote.".into(),
-            (None, false) => "Session ended.".into(),
+        let msg = match (&pr_url, is_pushed, worktree_preserved) {
+            (Some(url), _, _) => format!("Session ended. PR created: {url}"),
+            (None, true, _) => "Session ended. Branch pushed to remote.".into(),
+            (None, false, true) => {
+                let path = wt_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                format!(
+                    "Session ended. Worktree preserved at `{path}` \u{2014} branch not pushed and has local changes."
+                )
+            }
+            (None, false, false) => "Session ended.".into(),
         };
         ctx.say(&msg).await?;
         // Archive the thread (not in DMs). Users can still send messages
@@ -501,16 +537,14 @@ pub async fn login(ctx: Context<'_>) -> Result<(), AppError> {
     // Set a reply_waiter to capture the authorization code from the user's next message.
     // handler.rs intercepts the message and sends it through this oneshot channel.
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-    state.session_manager.set_reply_waiter(login_thread_id, reply_tx);
+    state
+        .session_manager
+        .set_reply_waiter(login_thread_id, reply_tx);
 
     let state_ref = state.clone();
     tokio::spawn(async move {
         // Wait for the user to paste the auth code (with 5 minute timeout)
-        let code_result = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            reply_rx,
-        )
-        .await;
+        let code_result = tokio::time::timeout(std::time::Duration::from_secs(300), reply_rx).await;
 
         let code = match code_result {
             Ok(Ok(code)) => code.trim().to_string(),
@@ -548,11 +582,15 @@ pub async fn login(ctx: Context<'_>) -> Result<(), AppError> {
         };
 
         if code.is_empty() {
-            let _ = channel_id.say(&http, "Empty code received. Login cancelled.").await;
+            let _ = channel_id
+                .say(&http, "Empty code received. Login cancelled.")
+                .await;
             return;
         }
 
-        let _ = channel_id.say(&http, "Exchanging authorization code for tokens...").await;
+        let _ = channel_id
+            .say(&http, "Exchanging authorization code for tokens...")
+            .await;
 
         // Exchange the code + verifier at the token endpoint
         match crate::claude::oauth::exchange_code(&code, &pkce.verifier, &pkce.state).await {
@@ -561,7 +599,10 @@ pub async fn login(ctx: Context<'_>) -> Result<(), AppError> {
                     Ok(()) => {
                         tracing::info!("OAuth login successful, credentials written");
                         let _ = channel_id
-                            .say(&http, "Authentication successful. Use `/claude` to start a session.")
+                            .say(
+                                &http,
+                                "Authentication successful. Use `/claude` to start a session.",
+                            )
                             .await;
                     }
                     Err(e) => {

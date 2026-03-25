@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::domain::{ClaudeEvent, ClaudeExitReason, ClaudeSessionId, ControlRequestData, ToolInputEntry};
+use crate::domain::{
+    ClaudeEvent, ClaudeExitReason, ClaudeSessionId, ControlRequestData, ToolInputEntry,
+};
 
 /// Parsed output from a single stdout line.
 pub struct ParsedLine {
@@ -655,7 +657,10 @@ mod tests {
         assert_eq!(parsed.events.len(), 1);
         match &parsed.events[0] {
             ClaudeEvent::ExitError(ClaudeExitReason::AuthFailure(detail)) => {
-                assert!(detail.contains("401"), "detail should contain 401: {detail}");
+                assert!(
+                    detail.contains("401"),
+                    "detail should contain 401: {detail}"
+                );
             }
             other => panic!("expected AuthFailure, got: {other:?}"),
         }
@@ -668,7 +673,10 @@ mod tests {
         let parsed = parse_stream_line(line);
         assert_eq!(parsed.events.len(), 1);
         assert!(matches!(&parsed.events[0], ClaudeEvent::Done));
-        assert!(parsed.result_text.is_none(), "error result text should be suppressed");
+        assert!(
+            parsed.result_text.is_none(),
+            "error result text should be suppressed"
+        );
     }
 
     #[test]

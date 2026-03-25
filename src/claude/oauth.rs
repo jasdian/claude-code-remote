@@ -132,7 +132,11 @@ pub async fn exchange_code(
 
         if http_status == 429 && attempt < MAX_TOKEN_RETRIES {
             let delay = RETRY_BASE_DELAY_SECS * (1 << attempt);
-            tracing::warn!(attempt, delay_secs = delay, "token endpoint rate limited, retrying");
+            tracing::warn!(
+                attempt,
+                delay_secs = delay,
+                "token endpoint rate limited, retrying"
+            );
             tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             continue;
         }
@@ -148,9 +152,7 @@ pub async fn exchange_code(
                         .or_else(|| v.get("error").and_then(|e| e.as_str()).map(String::from))
                 })
                 .unwrap_or_else(|| format!("HTTP {http_status}: {body}"));
-            return Err(AppError::claude(&format!(
-                "token exchange failed: {msg}",
-            )));
+            return Err(AppError::claude(&format!("token exchange failed: {msg}",)));
         }
 
         let token_response: serde_json::Value = serde_json::from_str(body.trim())
@@ -168,8 +170,7 @@ pub fn credentials_path() -> PathBuf {
     std::env::var("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into()))
-                .join(".claude")
+            PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".into())).join(".claude")
         })
         .join(".credentials.json")
 }
@@ -245,7 +246,9 @@ pub async fn write_credentials(token_response: &serde_json::Value) -> Result<(),
         let perms = std::fs::Permissions::from_mode(0o600);
         tokio::fs::set_permissions(&path, perms)
             .await
-            .map_err(|e| AppError::claude(&format!("failed to set credentials permissions: {e}")))?;
+            .map_err(|e| {
+                AppError::claude(&format!("failed to set credentials permissions: {e}"))
+            })?;
     }
 
     tracing::info!(path = %path.display(), "credentials written");
@@ -291,17 +294,28 @@ mod tests {
     #[test]
     fn urlencoded_redirect_uri() {
         let encoded = urlencoded(REDIRECT_URI);
-        assert_eq!(encoded, "https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback");
+        assert_eq!(
+            encoded,
+            "https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback"
+        );
     }
 
     #[tokio::test]
     async fn generate_pkce_valid_length_and_chars() {
         let pkce = generate_pkce().await.unwrap();
         assert_eq!(pkce.verifier.len(), CODE_VERIFIER_LEN);
-        assert!(pkce.verifier.chars().all(|c| PKCE_CHARSET.contains(&(c as u8))));
+        assert!(
+            pkce.verifier
+                .chars()
+                .all(|c| PKCE_CHARSET.contains(&(c as u8)))
+        );
         // Challenge should be non-empty base64url
         assert!(!pkce.challenge.is_empty());
-        assert!(pkce.challenge.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            pkce.challenge
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]

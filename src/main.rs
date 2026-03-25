@@ -82,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         && !stale.is_empty()
                     {
                         tracing::info!(count = stale.len(), "expiring stale idle sessions");
-                        for (tid, worktree_path) in stale {
+                        for (tid, worktree_path, is_pushed) in stale {
                             let _ = claude_crew::db::update_session_status(
                                 &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
                             ).await;
@@ -90,9 +90,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &reaper_state.db, tid, claude_crew::domain::SessionStatus::Expired,
                             ).await;
                             if let Some(ref wt) = worktree_path {
-                                claude_crew::claude::worktree::remove_worktree(
-                                    std::path::Path::new(wt), false,
-                                ).await;
+                                let wt_path = std::path::Path::new(wt.as_str());
+                                if is_pushed {
+                                    claude_crew::claude::worktree::remove_worktree(wt_path, true).await;
+                                } else {
+                                    let (has_uncommitted, commits_ahead) =
+                                        claude_crew::claude::worktree::worktree_local_state(wt_path).await;
+                                    if has_uncommitted || commits_ahead > 0 {
+                                        tracing::warn!(
+                                            ?tid, ?wt, has_uncommitted, commits_ahead,
+                                            "preserving expired worktree: has unpushed local changes"
+                                        );
+                                    } else {
+                                        claude_crew::claude::worktree::remove_worktree(wt_path, false).await;
+                                        let _ = claude_crew::db::set_worktree_path_null(
+                                            &reaper_state.db, tid,
+                                        ).await;
+                                    }
+                                }
                             }
                         }
                     }

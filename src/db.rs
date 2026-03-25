@@ -18,6 +18,7 @@ struct SessionRow {
     created_at: String,
     last_active_at: String,
     worktree_path: Option<String>,
+    is_pushed: bool,
 }
 
 impl<'r> FromRow<'r, SqliteRow> for SessionRow {
@@ -32,6 +33,10 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
             created_at: row.try_get("created_at")?,
             last_active_at: row.try_get("last_active_at")?,
             worktree_path: row.try_get("worktree_path")?,
+            is_pushed: row
+                .try_get::<i32, _>("is_pushed")
+                .map(|v| v != 0)
+                .unwrap_or(false),
         })
     }
 }
@@ -40,7 +45,7 @@ impl<'r> FromRow<'r, SqliteRow> for SessionRow {
 const NOW_UTC: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
 /// Schema version.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     let version: i32 = sqlx::query_scalar("PRAGMA user_version")
@@ -58,7 +63,8 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
                 status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
                 last_active_at TEXT NOT NULL DEFAULT ({NOW_UTC}),
-                worktree_path TEXT
+                worktree_path TEXT,
+                is_pushed INTEGER NOT NULL DEFAULT 0
             )"
         ))
         .execute(pool)
@@ -189,10 +195,19 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
         .execute(pool)
         .await?;
 
+        sqlx::query("PRAGMA user_version = 3").execute(pool).await?;
+        tracing::info!("migration: v2 -> v3");
+    }
+
+    if version < 4 {
+        sqlx::query("ALTER TABLE sessions ADD COLUMN is_pushed INTEGER NOT NULL DEFAULT 0")
+            .execute(pool)
+            .await?;
+
         sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)
             .await?;
-        tracing::info!("migration: v2 -> v{SCHEMA_VERSION}");
+        tracing::info!("migration: v3 -> v{SCHEMA_VERSION}");
     }
 
     Ok(())
@@ -260,7 +275,7 @@ pub async fn get_session_by_thread(
     let tid = thread_id.get() as i64;
     let row: Option<SessionRow> = sqlx::query_as(
         "SELECT id, thread_id, owner_id, claude_session_id, project, status,
-                created_at, last_active_at, worktree_path
+                created_at, last_active_at, worktree_path, is_pushed
          FROM sessions WHERE thread_id = ? AND status IN (?, ?, ?)",
     )
     .bind(tid)
@@ -281,7 +296,7 @@ pub async fn get_any_session_by_thread(
     let tid = thread_id.get() as i64;
     let row: Option<SessionRow> = sqlx::query_as(
         "SELECT id, thread_id, owner_id, claude_session_id, project, status,
-                created_at, last_active_at, worktree_path
+                created_at, last_active_at, worktree_path, is_pushed
          FROM sessions WHERE thread_id = ?",
     )
     .bind(tid)
@@ -295,7 +310,7 @@ pub async fn get_any_session_by_thread(
 pub async fn get_live_sessions(pool: &SqlitePool) -> Result<Vec<Session>, AppError> {
     let rows: Vec<SessionRow> = sqlx::query_as(
         "SELECT id, thread_id, owner_id, claude_session_id, project, status,
-                created_at, last_active_at, worktree_path
+                created_at, last_active_at, worktree_path, is_pushed
          FROM sessions WHERE status IN (?, ?)
          ORDER BY created_at DESC",
     )
@@ -331,6 +346,7 @@ fn session_from_row(r: SessionRow) -> Session {
         project: Arc::from(r.project.as_str()),
         created_at: r.created_at.parse().unwrap_or_default(),
         worktree_path: r.worktree_path.map(|s| Arc::from(s.as_str())),
+        is_pushed: r.is_pushed,
     }
 }
 
@@ -370,12 +386,13 @@ pub async fn update_session_status(
 }
 
 /// Find idle sessions whose last_active_at is older than `timeout_minutes`.
+/// Returns `(thread_id, worktree_path, is_pushed)`.
 pub async fn find_stale_idle_sessions(
     pool: &SqlitePool,
     timeout_minutes: u64,
-) -> Result<Vec<(ThreadId, Option<String>)>, AppError> {
-    let rows: Vec<(i64, Option<String>)> = sqlx::query_as(
-        "SELECT thread_id, worktree_path FROM sessions
+) -> Result<Vec<(ThreadId, Option<String>, bool)>, AppError> {
+    let rows: Vec<(i64, Option<String>, i32)> = sqlx::query_as(
+        "SELECT thread_id, worktree_path, is_pushed FROM sessions
          WHERE status = 'idle'
          AND last_active_at < datetime('now', ? || ' minutes')",
     )
@@ -384,7 +401,7 @@ pub async fn find_stale_idle_sessions(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(tid, wt)| (ThreadId::new(tid as u64), wt))
+        .map(|(tid, wt, pushed)| (ThreadId::new(tid as u64), wt, pushed != 0))
         .collect())
 }
 
@@ -397,6 +414,34 @@ pub async fn touch_session(pool: &SqlitePool, thread_id: ThreadId) -> Result<(),
     .bind(tid)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Persist the push state for a session's worktree branch.
+pub async fn set_is_pushed(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+    is_pushed: bool,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query("UPDATE sessions SET is_pushed = ? WHERE thread_id = ?")
+        .bind(is_pushed as i32)
+        .bind(tid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clear the worktree path for a session (e.g. after removal).
+pub async fn set_worktree_path_null(
+    pool: &SqlitePool,
+    thread_id: ThreadId,
+) -> Result<(), AppError> {
+    let tid = thread_id.get() as i64;
+    sqlx::query("UPDATE sessions SET worktree_path = NULL WHERE thread_id = ?")
+        .bind(tid)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
