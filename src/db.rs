@@ -200,9 +200,20 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), AppError> {
     }
 
     if version < 4 {
-        sqlx::query("ALTER TABLE sessions ADD COLUMN is_pushed INTEGER NOT NULL DEFAULT 0")
-            .execute(pool)
-            .await?;
+        // Only ALTER if the column doesn't already exist (fresh DBs include it in CREATE TABLE)
+        let has_is_pushed: bool = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'is_pushed'",
+        )
+        .fetch_one(pool)
+        .await
+        .map(|c| c > 0)
+        .unwrap_or(false);
+
+        if !has_is_pushed {
+            sqlx::query("ALTER TABLE sessions ADD COLUMN is_pushed INTEGER NOT NULL DEFAULT 0")
+                .execute(pool)
+                .await?;
+        }
 
         sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))
             .execute(pool)

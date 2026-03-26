@@ -202,15 +202,10 @@ pub async fn handle_message(
                     }
                     if wt_exists {
                         // Pull latest, start fresh conversation (stale context risk)
-                        if let Err(e) =
-                            crate::claude::worktree::try_pull_branch(wt_path).await
-                        {
+                        if let Err(e) = crate::claude::worktree::try_pull_branch(wt_path).await {
                             let _ = msg
                                 .channel_id
-                                .say(
-                                    ctx,
-                                    &format!("Warning: git pull failed in worktree: {e}"),
-                                )
+                                .say(ctx, &format!("Warning: git pull failed in worktree: {e}"))
                                 .await;
                         }
                         (None, wt)
